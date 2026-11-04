@@ -2,13 +2,14 @@
   "manifestVersion": 2,
   "id": "finline",
   "name": "Finline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Git graph for the active worktree: commits, branches, tags and remotes in colored lanes.",
   "author": {
     "name": "Denni Bevilacqua",
     "url": "https://github.com/dennib"
   },
   "license": "MIT",
+  "icon": "assets/icon.png",
   "repository": "https://github.com/dennib/finline",
   "engines": {
     "orca": ">=1.4.248"
@@ -30,6 +31,22 @@
   "capabilities": [
     {
       "kind": "workspace:read"
+    }
+  ],
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "Finline: a git graph for Orca, beside the panel showing a repository with branches, merges and tags"
+  },
+  "screenshots": [
+    {
+      "path": "assets/screenshot-graph.png",
+      "alt": "The Finline panel showing colored lanes for main, feature branches, a hotfix and their merges, with branch, remote and tag badges",
+      "caption": "Every branch at a glance"
+    },
+    {
+      "path": "assets/screenshot-sidebar.png",
+      "alt": "The Finline panel at sidebar width, showing the graph, refs, commit subjects and ages",
+      "caption": "Made for the sidebar"
     }
   ]
 }

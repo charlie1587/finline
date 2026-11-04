@@ -1,0 +1,31 @@
+{
+  "manifestVersion": 2,
+  "id": "finline",
+  "name": "Finline",
+  "version": "0.1.0",
+  "description": "Git graph for the active worktree: commits, branches and tags.",
+  "license": "MIT",
+  "repository": "https://github.com/dennib/finline",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "graph",
+        "title": "Finline",
+        "icon": "branch",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    }
+  ]
+}

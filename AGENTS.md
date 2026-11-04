@@ -1,0 +1,70 @@
+# AGENTS.md
+
+Guidance for coding agents (Claude Code, Codex and others) working in this repository.
+
+## What this is
+
+Finline is an [Orca](https://onorca.dev) plugin (Orca: a desktop IDE that runs coding agents in parallel git worktrees). It draws a git graph of the focused worktree in Orca's right sidebar. The plugin folder *is* the repo: `orca-plugin.json` at the root, TypeScript sources shipped as-is. **There is no build step and no `package.json`.** Orca transpiles `.ts` itself, strips types only and never type-checks.
+
+Orca's plugin docs live in `stablyai/orca` under `docs/reference/`: `plugin-authoring.md`, `plugin-manifest.md`, `plugin-host-api.md`, `plugin-declarative-ui.md`. Read the relevant one before using a host API or manifest field. The API is Alpha and the docs are the source of truth.
+
+## Commands
+
+```sh
+node --test src/layout.test.ts                                   # lane layout tests (Node >= 22.18 strips types)
+node --test --test-name-pattern="merge" src/layout.test.ts       # a single test
+orca plugin validate .                                           # manifest checks the catalog runs
+orca plugin dev load . [--approve <fingerprint>]                 # load as dev plugin `local.finline`
+orca plugin dev watch .                                          # load + stream logs + reload on save
+orca plugin dev request . graph.load --data '{"limit":5}'        # call a worker handler without the panel
+orca plugin shot local.finline [--width 340] [--out file.png]    # PNG of the panel as Orca draws it
+orca plugin logs local.finline                                   # worker `orca.log` + frame console.warn/error
+```
+
+- A first `dev load` (or one after adding capabilities) prints an approval fingerprint. Approving grants full access, so **ask the user before passing `--approve`**.
+- To show another repo in the panel, put its path in `.orca/dev-repo.txt`. `.orca/` is git-ignored and Orca's watcher skips it, so saving it doesn't reload the panel. Trigger a refresh with a ref change, e.g. `git update-ref refs/x HEAD && git update-ref -d refs/x`.
+- `orca plugin types`, `orca plugin check` and `orca plugin test` are broken on this Windows install (missing `orca.d.ts`, the test resolver refuses `orca-runtime.mjs`). So there are no Orca typings or test kit. The frame declares the `window.orca` surface it uses at the top of `src/graph/main.ts`.
+
+## Architecture
+
+Two processes talk through a typed request/post contract (`src/protocol.ts`, which augments the `orca` module). Shared data shapes live in `src/types.ts`.
+
+**Worker** (`src/worker.ts`, `execution: trusted-worker`, a Node process):
+- `graph.load {limit, skip, preferredPath?}` resolves the repo, then runs the system `git` through `src/git.ts` (`execFile`, no shell). It returns one page of `git log --all --topo-order` and fetches `limit + 1` commits to compute `hasMore`.
+- **Repo resolution is a workaround.** `workspace.readContext` gives only `displayName`, `branch` and terminal ids, with no path or id. The worker matches it against `workspace.list` by name and branch. Worktree workspaces are named after their branch, so two repos on the same branch collide. In that case it returns `reason: 'ambiguous'` with candidates, and the panel sends back `preferredPath`. Local workspaces have `hostId: "local"`, not `null`.
+- It keeps one `fs.watch(commonDir, {recursive: true})` on the repo's git common dir, which also covers `worktrees/<name>/HEAD|index`. It filters to HEAD, refs, packed-refs and index (ignoring `.lock`), debounces, and posts `repo.changed` to panels.
+- Refs come back typed (`head | branch | remote | tag | detached`) by matching `%D` decorations against `git remote` names. `<remote>/HEAD` is dropped.
+
+**Panel** (`src/graph/`, `ui: "html"`, an isolated frame with no Node or network, talking only through `window.orca`):
+- It must be an html panel: components panels (`ui: "components"`) can't draw SVG or canvas.
+- `main.ts` holds all commits loaded so far, re-runs the layout over the full list on every change, and re-renders the SVG plus the DOM rows (built with `createElement`, never `innerHTML`).
+- Refresh triggers: worker `repo.changed`, `workspace.changed`, and an explicit load in setup. The panel does not get the documented initial `workspace.changed` delivery.
+- Paging is triggered by scroll. Refresh reloads `max(PAGE, loaded)` from the top, and a `seq` counter discards stale answers.
+- The ambiguous-repo choice is pinned in `localStorage`, keyed by every current terminal id (unique per workspace), and propagated to new terminals on each pinned load. Atoms with `persist: 'workspace'` exist only for components panels.
+
+**Layout** (`src/layout.ts`, pure, shared by panel and tests): one pass over topo-ordered commits, keeping `lanes[]` (the hash each lane is heading to).
+- A commit takes the first lane expecting it, or a free lane. Other lanes expecting it converge and are freed.
+- The first parent always continues the commit's lane and colour. Other parents reuse a lane already heading there, or open one.
+- Edges whose parent isn't loaded end at `toRow = rows`. `edgePath` turns an edge into SVG: bend into the lane, run straight, bend into the parent.
+
+## Gotchas
+
+- `plugin.request` input is strict JSON: a key whose value is `undefined` fails with `invalid_params`, so omit the key.
+- In the frame, CSS `display` overrides the `hidden` attribute unless there's a global `[hidden] { display: none !important }` (already in `style.css`).
+- `orca plugin shot --act` only works with Orca's window hidden or minimized. Otherwise ask the user to click. A shot can catch the panel mid-load, so re-shoot after a short wait.
+- Panel response cap is 1 MiB (worker `MAX_LIMIT` is 1000 commits), input 64 KiB, and posts are rate-limited.
+
+## Releasing
+
+The catalog lists from `main`, using the version tag and the `orca-plugin` GitHub topic. Work happens on `develop`.
+1. Bump `version` in `orca-plugin.json` and run `orca plugin validate .`.
+2. Fast-forward `main` to `develop` and push.
+3. Run `git tag -a vX.Y.Z -m vX.Y.Z` and push the tag.
+
+The listing at `onorca.dev/plugins/dennib/finline` updates after the indexer runs (every ~30 min). Catalog images (`icon`, `cover`, `screenshots` in `assets/`) have size limits in `plugin-manifest.md`. `assets/icon.svg` is the icon's source.
+
+## Constraints
+
+- Don't copy code from the VS Code "Git Graph" extension (mhutchie). Its license isn't MIT. Reimplement from scratch and don't use "Git Graph" as a name.
+- MIT-licensed. Orca's listing policy forbids paywalls or license keys in listed plugins.
+- Keep the worker read-only on the repository unless a feature explicitly adds a git action.

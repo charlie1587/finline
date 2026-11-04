@@ -1,5 +1,13 @@
 // Data shapes shared by the worker and the panel.
 
+export type RefKind = 'head' | 'branch' | 'remote' | 'tag' | 'detached'
+
+export interface Ref {
+  /** Display name: "main", "origin/main", "v1.0"; "HEAD" when detached. */
+  name: string
+  kind: RefKind
+}
+
 export interface Commit {
   hash: string
   shortHash: string
@@ -8,8 +16,7 @@ export interface Commit {
   /** ms since the epoch */
   authoredAt: number
   subject: string
-  /** Decorations from %D, e.g. ["HEAD -> main", "origin/main", "tag: v1"] */
-  refs: string[]
+  refs: Ref[]
 }
 
 export interface Candidate {
@@ -18,12 +25,22 @@ export interface Candidate {
   branch: string | null
 }
 
+export interface RepoInfo {
+  path: string
+  name: string
+  branch: string | null
+  gitVersion: string
+}
+
 export type GraphLoad =
   | {
       ok: true
-      repo: { path: string; name: string; branch: string | null; gitVersion: string }
+      repo: RepoInfo
+      /** Commits `skip` .. `skip + commits.length` of `git log --all --topo-order`. */
       commits: Commit[]
-      /** How the repo path was found, for the prototype's diagnostics. */
+      skip: number
+      hasMore: boolean
+      /** How the repo path was found, for diagnostics. */
       resolvedBy: string
       watching: boolean
     }

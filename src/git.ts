@@ -1,7 +1,7 @@
 // Thin wrapper over the system `git`, run with execFile (no shell) so paths with spaces and
 // Windows drive letters pass through untouched.
 import { execFile } from 'node:child_process'
-import type { Commit } from './types'
+import type { Commit, Ref } from './types'
 
 const FIELD = '\x1f'
 const RECORD = '\x1e'
@@ -26,15 +26,44 @@ export async function gitVersion(): Promise<string> {
   return (await git('.', ['--version'])).trim()
 }
 
-export async function readCommits(cwd: string, limit: number, signal?: AbortSignal): Promise<Commit[]> {
-  const out = await git(
-    cwd,
-    ['log', '--all', '--topo-order', `--max-count=${limit}`, `--format=${FORMAT}`],
-    signal
-  )
+export async function remoteNames(cwd: string): Promise<string[]> {
+  return (await git(cwd, ['remote'])).split(/\r?\n/).filter(Boolean)
+}
+
+/** Splits a `%D` decoration list into typed refs. */
+export function parseRefs(decorations: string, remotes: readonly string[]): Ref[] {
+  if (!decorations) return []
+  return decorations.split(', ').flatMap((raw): Ref[] => {
+    if (raw.startsWith('HEAD -> ')) return [{ name: raw.slice(8), kind: 'head' }]
+    if (raw === 'HEAD') return [{ name: 'HEAD', kind: 'detached' }]
+    if (raw.startsWith('tag: ')) return [{ name: raw.slice(5), kind: 'tag' }]
+    // origin/HEAD only says which branch the remote considers default; skip it like Git GUIs do.
+    if (remotes.some((r) => raw === `${r}/HEAD`)) return []
+    if (remotes.some((r) => raw.startsWith(`${r}/`))) return [{ name: raw, kind: 'remote' }]
+    return [{ name: raw, kind: 'branch' }]
+  })
+}
+
+export async function readCommits(
+  cwd: string,
+  opts: { skip: number; limit: number; remotes: readonly string[] },
+  signal?: AbortSignal
+): Promise<Commit[]> {
+  let out: string
+  try {
+    out = await git(
+      cwd,
+      ['log', '--all', '--topo-order', `--skip=${opts.skip}`, `--max-count=${opts.limit}`, `--format=${FORMAT}`],
+      signal
+    )
+  } catch (error) {
+    // A repo with no commits yet has nothing to log.
+    if (/does not have any commits|bad default revision/i.test((error as Error).message)) return []
+    throw error
+  }
   return out
     .split(RECORD)
-    .map((record) => record.replace(/^\n/, ''))
+    .map((record) => record.replace(/^\r?\n/, ''))
     .filter((record) => record.length > 0)
     .map((record) => {
       const [hash, shortHash, parents, author, at, refs, subject] = record.split(FIELD)
@@ -45,7 +74,7 @@ export async function readCommits(cwd: string, limit: number, signal?: AbortSign
         author,
         authoredAt: Number(at) * 1000,
         subject,
-        refs: refs ? refs.split(', ') : []
+        refs: parseRefs(refs, opts.remotes)
       }
     })
 }

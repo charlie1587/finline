@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finline</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="repo" id="repo">Finline</span>
+      <span class="branch" id="branch" hidden></span>
+      <button class="icon" id="refresh" type="button" title="Refresh" aria-label="Refresh">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" />
+        </svg>
+      </button>
+    </header>
+    <section class="message" id="message" hidden></section>
+    <main class="list" id="list" tabindex="0" aria-label="Commits">
+      <svg class="graph" id="graph" aria-hidden="true"></svg>
+      <div class="rows" id="rows" role="listbox" aria-label="Commits"></div>
+      <div class="more" id="more" hidden>Loading more…</div>
+    </main>
+    <script type="module" src="main.ts"></script>
+  </body>
+</html>

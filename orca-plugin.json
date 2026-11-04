@@ -3,7 +3,7 @@
   "id": "finline",
   "name": "Finline",
   "version": "0.1.0",
-  "description": "Git graph for the active worktree: commits, branches and tags.",
+  "description": "Git graph for the active worktree: commits, branches, tags and remotes in colored lanes.",
   "license": "MIT",
   "repository": "https://github.com/dennib/finline",
   "engines": {
@@ -18,8 +18,8 @@
         "id": "graph",
         "title": "Finline",
         "icon": "branch",
-        "entry": "src/panel.tsx",
-        "ui": "components"
+        "entry": "src/graph/index.html",
+        "ui": "html"
       }
     ]
   },

@@ -22,6 +22,14 @@ What the first prototype (worker + components panel listing the latest commits) 
    `refs\heads`, `refs\tags`, `HEAD` and `index`. Debounced 300 ms, with `.lock` files ignored. Branch and tag changes reached the
    open panel without a manual refresh.
 
+## Developing the graph
+
+- `node --test src/layout.test.ts` runs the lane layout tests (Node ≥ 22.18 strips the types).
+- To try the panel on another repo, put its path in `.orca/dev-repo.txt`. The worker then uses it
+  instead of the focused workspace. `.orca/` is git-ignored and skipped by Orca's watcher.
+- In the html frame the repo choice is pinned by terminal id in `localStorage`, because atoms with
+  `persist: 'workspace'` exist only for components panels.
+
 ## Orca quirks met along the way
 
 - `orca plugin types` / `create` / `check` fail on this install: `orca.d.ts` is missing from

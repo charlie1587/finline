@@ -1,11 +1,19 @@
-# Finline
+<p align="center">
+  <img src="assets/icon.png" alt="Finline logo: an orca's fin drawn as three graph lanes" width="128" height="128">
+</p>
 
-A git graph for [Orca](https://onorca.dev): the commits of the focused worktree in colored lanes,
-with branches, tags and remotes, in Orca's right sidebar.
+<h1 align="center">Finline</h1>
 
-![Finline showing a repository with merged feature branches, tags and remote branches](docs/images/graph.png)
+<p align="center">
+  A git graph for <a href="https://onorca.dev">Orca</a>: the commits of the focused worktree in
+  colored lanes, with branches, tags and remotes, in Orca's right sidebar.
+</p>
 
-*fin* (an orca's fin) + *line* (the lanes of the graph).
+<p align="center"><em>fin</em> (an orca's fin) + <em>line</em> (the lanes of the graph).</p>
+
+![The Finline panel showing colored lanes for main, feature branches, a hotfix and their merges, with branch, remote and tag badges](assets/screenshot-graph.png)
+
+![The Finline panel at sidebar width, showing the graph, refs, commit subjects and ages](assets/screenshot-sidebar.png)
 
 ## Features
 

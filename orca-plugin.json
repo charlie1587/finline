@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "finline",
   "name": "Finline",
-  "version": "0.1.2",
-  "description": "Git graph for the active worktree: commits, branches, tags and remotes in colored lanes.",
+  "version": "0.2.0",
+  "description": "Git graph for the active worktree: branches, tags and remotes in colored lanes, commit details, and git actions from a right-click.",
   "author": {
     "name": "Denni Bevilacqua",
     "url": "https://github.com/dennib"

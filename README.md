@@ -26,9 +26,16 @@
 - Click a commit to open its details under it: hash, parents, author and committer, the full
   message, and the changed files as a folder tree with line counts.
 - Fits the narrow sidebar: author and hash columns appear only when there is room.
+- Git actions from a right-click on a commit or a badge (or Shift+F10, or the ⋯ in the details):
+  - branches and tags: check out, create, rename, delete, push, delete from the remote;
+  - integration: merge, rebase, cherry-pick, revert, and a banner to continue or abort a stopped
+    one;
+  - reset (soft, mixed, hard) and copying a hash or name.
+- Fetch, pull and push in the header, with how far the branch is ahead and behind.
+- Every action shows the git command it will run. Finline warns before changing files that have
+  uncommitted changes or that an agent is working on, and asks before anything destructive.
 
-Finline 0.1 is read-only. Diffs and actions (checkout, merge, rebase, cherry-pick,
-branches and tags) are planned.
+Diffs are planned.
 
 ## Install
 
@@ -41,13 +48,18 @@ Requires Orca 1.4.248 or later and `git` on your `PATH`.
 
 Finline is a **full-access** plugin (`trusted-worker`): Orca asks you to approve it on install.
 
-- **Runs a worker process** that calls your system `git` (`git log`, `git rev-parse`,
-  `git branch`, `git remote`) in the focused workspace's folder, and watches that repository's
-  `.git` folder for changes. It only reads; it never writes to your repository.
+- **Runs a worker process** that calls your system `git` in the focused workspace's folder and
+  watches that repository's `.git` folder for changes. It reads on its own; it changes the
+  repository only when you pick an action, with fixed git arguments it validates first.
 - **`workspace:read`**: reads the focused workspace's name and branch, and the list of workspaces,
   to find which repository to show.
+- **`agent:read`**: sees whether an agent is working in the workspace, to warn you before an
+  action changes its files.
+- **`terminal:send`**: when a fetch, pull or push needs credentials git cannot ask for in the
+  background, "Run in terminal" opens a new Orca terminal with that git command.
 
-Finline makes no network requests and collects no data.
+Finline itself makes no network requests and collects no data. Fetch, pull and push reach your
+remotes through git, with your git credentials.
 
 ## Known limitations
 

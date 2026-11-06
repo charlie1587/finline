@@ -1,7 +1,9 @@
 // Thin wrapper over the system `git`, run with execFile (no shell) so paths with spaces and
 // Windows drive letters pass through untouched.
 import { execFile } from 'node:child_process'
-import type { Commit, CommitDetails, FileChange, FileStatus, Ref } from './types'
+import { access } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { Commit, CommitDetails, FileChange, FileStatus, Operation, Ref, RepoStatus } from './types'
 
 const FIELD = '\x1f'
 const RECORD = '\x1e'
@@ -20,6 +22,112 @@ export function git(cwd: string, args: string[], signal?: AbortSignal): Promise<
       }
     )
   })
+}
+
+export interface RunResult {
+  code: number
+  stdout: string
+  stderr: string
+  timedOut: boolean
+}
+
+/**
+ * Runs git for an action: never throws for a non-zero exit, keeps stderr (where push, pull and
+ * merge report), and stops after `timeoutMs`. Prompts are off, so nothing waits on a person.
+ */
+export function runGit(
+  cwd: string,
+  args: string[],
+  opts: { timeoutMs: number; signal?: AbortSignal }
+): Promise<RunResult> {
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0', // fail instead of asking for a username or password
+    GIT_EDITOR: 'true', // accept prepared messages (merge, revert, rebase --continue)
+    GIT_SEQUENCE_EDITOR: 'true',
+    GIT_MERGE_AUTOEDIT: 'no',
+    GCM_INTERACTIVE: 'auto' // Git Credential Manager may still show its own sign-in window
+  }
+  return new Promise((resolve) => {
+    const child = execFile(
+      'git',
+      ['-C', cwd, '-c', 'core.quotepath=off', '-c', 'color.ui=false', ...args],
+      { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, windowsHide: true, timeout: opts.timeoutMs, signal: opts.signal, env },
+      (error, stdout, stderr) => {
+        const failure = error as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null
+        resolve({
+          code: failure ? (typeof failure.code === 'number' ? failure.code : 1) : 0,
+          stdout,
+          stderr: stderr || (failure && typeof failure.code !== 'number' ? failure.message : ''),
+          timedOut: Boolean(failure?.killed)
+        })
+      }
+    )
+    child.stdin?.end() // nothing to read: a prompt that slips through sees end of input
+  })
+}
+
+/**
+ * Parses `git status --porcelain=v2 --branch -z`: branch headers, then one record per path
+ * (`1` changed, `2` renamed with an extra path token, `u` unmerged, `?` untracked).
+ */
+export function parseStatus(
+  out: string
+): Pick<RepoStatus, 'branch' | 'head' | 'upstream' | 'ahead' | 'behind' | 'staged' | 'unstaged' | 'untracked' | 'conflicts'> {
+  const status = { branch: null as string | null, head: null as string | null, upstream: null as string | null, ahead: 0, behind: 0, staged: 0, unstaged: 0, untracked: 0, conflicts: 0 }
+  const tokens = out.split('\0')
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token.startsWith('# branch.oid ')) {
+      const oid = token.slice(13)
+      status.head = oid === '(initial)' ? null : oid
+    } else if (token.startsWith('# branch.head ')) {
+      const head = token.slice(14)
+      status.branch = head === '(detached)' ? null : head
+    } else if (token.startsWith('# branch.upstream ')) {
+      status.upstream = token.slice(18)
+    } else if (token.startsWith('# branch.ab ')) {
+      const [ahead, behind] = token.slice(12).split(' ')
+      status.ahead = Math.abs(Number(ahead))
+      status.behind = Math.abs(Number(behind))
+    } else if (token.startsWith('1 ') || token.startsWith('2 ')) {
+      const [x, y] = token.slice(2, 4)
+      if (x !== '.') status.staged++
+      if (y !== '.') status.unstaged++
+      if (token.startsWith('2 ')) i++ // the rename's source path is its own token
+    } else if (token.startsWith('u ')) {
+      status.conflicts++
+    } else if (token.startsWith('? ')) {
+      status.untracked++
+    }
+  }
+  return status
+}
+
+export async function readStatus(cwd: string, signal?: AbortSignal): Promise<RepoStatus> {
+  const [out, remotes, { gitDir }] = await Promise.all([
+    git(cwd, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal'], signal),
+    remoteNames(cwd),
+    gitDirs(cwd)
+  ])
+  return { ...parseStatus(out), operation: await operationInProgress(gitDir), remotes }
+}
+
+/** Which multi-step operation is stopped, from the marker files git leaves in the git dir. */
+async function operationInProgress(gitDir: string): Promise<Operation | null> {
+  const exists = (name: string) =>
+    access(join(gitDir, name)).then(
+      () => true,
+      () => false
+    )
+  const [rebaseMerge, rebaseApply, merge, cherryPick, revert] = await Promise.all(
+    ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'].map(exists)
+  )
+  if (rebaseMerge || rebaseApply) return 'rebase'
+  if (merge) return 'merge'
+  if (cherryPick) return 'cherry-pick'
+  if (revert) return 'revert'
+  return null
 }
 
 export async function gitVersion(): Promise<string> {

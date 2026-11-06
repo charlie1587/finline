@@ -31,6 +31,12 @@
   "capabilities": [
     {
       "kind": "workspace:read"
+    },
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "terminal:send"
     }
   ],
   "cover": {

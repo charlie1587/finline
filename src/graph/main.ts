@@ -1,22 +1,22 @@
 // Finline graph panel: an isolated HTML frame that draws the commit graph in SVG beside the
 // commit list. It talks to the worker with orca.plugin.request and refreshes when the worker
-// posts `repo.changed` or Orca reports `workspace.changed`.
+// posts `repo.changed` or Orca reports `workspace.changed`. Git actions live in actions.ts.
 import { edgePath, layoutGraph, type Layout } from '../layout.ts'
-import type { Candidate, Commit, CommitDetails, DetailsLoad, FileChange, GraphLoad, Ref, RepoInfo } from '../types.ts'
-
-// The frame's window.orca; typings are unavailable on this Orca install, so declare what we use.
-interface Disposable {
-  dispose(): void
-}
-interface FrameOrca {
-  host: { call(method: string, params?: unknown): Promise<any> }
-  plugin: {
-    request(name: string, input?: unknown, options?: { timeoutMs?: number }): Promise<any>
-    on(event: string, handler: (payload: any) => void): Disposable
-  }
-  on(event: string, handler: (payload: any) => void): Disposable
-}
-declare const orca: FrameOrca
+import type {
+  Candidate,
+  Commit,
+  CommitDetails,
+  DetailsLoad,
+  FileChange,
+  GraphLoad,
+  Ref,
+  RepoInfo,
+  RepoStatus,
+  StatusLoad
+} from '../types.ts'
+import { commitMenu, createToolbar, initActions, refMenu, renderBanner } from './actions.ts'
+import { el, icon, ICONS, moving, svg } from './dom.ts'
+import { orca } from './frame.ts'
 
 const PAGE = 200
 const ROW_H = 24
@@ -37,6 +37,7 @@ const graphEl = $<SVGSVGElement>('graph')
 const rowsEl = $<HTMLElement>('rows')
 const moreEl = $<HTMLElement>('more')
 const detailsEl = $<HTMLElement>('details')
+const bannerEl = $<HTMLElement>('banner')
 
 let repo: RepoInfo | null = null
 let commits: Commit[] = []
@@ -138,6 +139,7 @@ async function apply(result: GraphLoad, append: boolean): Promise<void> {
     detailsCache.clear()
     select(null)
     renderList()
+    setStatus(null)
     if (result.reason === 'ambiguous') showPicker(result.message, result.candidates)
     else showMessage(result.reason === 'no-workspace' ? 'No workspace' : 'No repository', result.message)
     return
@@ -156,10 +158,51 @@ async function apply(result: GraphLoad, append: boolean): Promise<void> {
   hideMessage()
   renderHeader()
   renderList()
-  if (!append) animateArrivals(shown)
+  if (!append) {
+    animateArrivals(shown)
+    void loadStatus()
+  }
   // A short page may not fill the list; keep loading until it scrolls.
   queueMicrotask(maybeLoadMore)
 }
+
+// ---- Status: branch, upstream, uncommitted changes, a stopped merge --------------------------
+
+let status: RepoStatus | null = null
+let statusSeq = 0
+const toolbar = createToolbar()
+refreshEl.before(toolbar.node)
+
+function setStatus(next: RepoStatus | null): void {
+  status = next
+  toolbar.render(status)
+  renderBanner(bannerEl, status)
+}
+
+/** Reads status for the shown repo; the newest answer wins. */
+async function loadStatus(): Promise<RepoStatus | null> {
+  const mine = ++statusSeq
+  const path = repo?.path
+  if (!path) {
+    setStatus(null)
+    return null
+  }
+  try {
+    const result: StatusLoad = await orca.plugin.request('repo.status', { path })
+    if (mine !== statusSeq || repo?.path !== path) return status
+    setStatus(result.ok ? result.status : null)
+  } catch {
+    if (mine === statusSeq) setStatus(null)
+  }
+  return status
+}
+
+initActions({
+  repoPath: () => repo?.path ?? null,
+  status: () => status,
+  loadStatus,
+  refresh
+})
 
 /**
  * A fresh list (first load, another repo) slides in row by row from the top; on a refresh,
@@ -220,19 +263,6 @@ function showPicker(text: string, candidates: Candidate[]): void {
 
 // ---- Rendering -----------------------------------------------------------------------------
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag)
-  if (cls) node.className = cls
-  if (text !== undefined) node.textContent = text
-  return node
-}
-
-function svg<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>): SVGElementTagNameMap[K] {
-  const node = document.createElementNS('http://www.w3.org/2000/svg', tag)
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value))
-  return node
-}
-
 const laneColor = (i: number) => `var(--lane-${i % LANE_COLORS})`
 
 function renderHeader(): void {
@@ -245,8 +275,6 @@ function renderHeader(): void {
 // ---- Motion --------------------------------------------------------------------------------
 // Short, eased and skipped entirely when the system asks for reduced motion.
 
-const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
-const moving = () => !reducedMotion.matches
 const EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)'
 
 /** Animates a height change; with `keep`, the end height holds until the caller cancels. */
@@ -345,6 +373,9 @@ function renderRow(commit: Commit, indent: number, color: number): HTMLElement {
   return row
 }
 
+/** What a badge stands for, so right-clicking it opens that ref's menu. */
+const badgeRefs = new WeakMap<Element, { ref: Ref; remotes: string[] }>()
+
 /** Local branches absorb their same-named remote copies on the same commit: `main · origin`. */
 function renderRefs(refs: Ref[], color: number): HTMLElement[] {
   const remotes = refs.filter((r) => r.kind === 'remote')
@@ -352,6 +383,7 @@ function renderRefs(refs: Ref[], color: number): HTMLElement[] {
   const badges: HTMLElement[] = []
   const badge = (ref: Ref, cls: string, label: string, remoteNames: string[] = []) => {
     const node = el('span', `ref ${cls}`)
+    badgeRefs.set(node, { ref, remotes: remoteNames })
     node.style.color = laneColor(color)
     node.title = [ref.name, ...remoteNames.map((r) => `${r}/${ref.name}`)].join(', ')
     node.append(el('span', 'name', label))
@@ -504,23 +536,31 @@ async function loadDetails(hash: string | null): Promise<void> {
   }
 }
 
-function closeButton(): HTMLElement {
+/** Top-right of the details: the commit's actions (⋯) and close. */
+function detailsControls(): HTMLElement {
+  const controls = el('div', 'details-controls')
+  const more = el('button', 'icon details-more')
+  more.type = 'button'
+  more.title = 'Actions (right-click a commit or badge, or Shift+F10)'
+  more.setAttribute('aria-label', 'Commit actions')
+  more.setAttribute('aria-haspopup', 'menu')
+  more.append(icon(ICONS.more))
+  more.addEventListener('click', () => openSelectedMenu(more))
   const close = el('button', 'icon details-close')
   close.type = 'button'
   close.title = 'Close (Esc)'
   close.setAttribute('aria-label', 'Close commit details')
-  const glyph = svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true' })
-  glyph.append(svg('path', { d: 'M4 4l8 8M12 4l-8 8' }))
-  close.append(glyph)
+  close.append(icon(ICONS.close))
   close.addEventListener('click', () => {
     select(null)
     listEl.focus()
   })
-  return close
+  controls.append(more, close)
+  return controls
 }
 
 function renderDetailsMessage(tone: 'pending' | 'error', text: string): void {
-  morphDetails(() => detailsEl.replaceChildren(closeButton(), el('p', tone, text)))
+  morphDetails(() => detailsEl.replaceChildren(detailsControls(), el('p', tone, text)))
 }
 
 /** Two columns when there is room (commit info | changed files), stacked in the sidebar. */
@@ -542,7 +582,7 @@ function renderDetails(d: CommitDetails): void {
 
   const grid = el('div', 'details-grid')
   grid.append(info, renderFiles(d))
-  morphDetails(() => detailsEl.replaceChildren(closeButton(), grid))
+  morphDetails(() => detailsEl.replaceChildren(detailsControls(), grid))
 }
 
 function person(name: string, email: string): Node[] {
@@ -709,6 +749,39 @@ rowsEl.addEventListener('click', (event) => {
   if (row?.dataset.hash) select(row.dataset.hash === selected ? null : row.dataset.hash)
 })
 
+// Right-click: a badge opens its ref's menu, anywhere else on a row the commit's. It leaves the
+// selection and the details as they are; the row is only outlined while its menu is open.
+rowsEl.addEventListener('contextmenu', (event) => {
+  const target = event.target as Element
+  const row = target.closest<HTMLElement>('.row')
+  const commit = row ? commits.find((c) => c.hash === row.dataset.hash) : undefined
+  if (!row || !commit) return
+  event.preventDefault()
+  const at = { x: event.clientX, y: event.clientY }
+  const options = { returnFocus: listEl, onClose: () => row.classList.remove('menu-target') }
+  row.classList.add('menu-target')
+  const badge = target.closest('.ref')
+  const info = badge ? badgeRefs.get(badge) : undefined
+  if (info) refMenu(info.ref, info.remotes, commit, at, options)
+  else commitMenu(commit, at, options)
+})
+
+/** The selected commit's menu, opened from the keyboard or the details' ⋯ button. */
+function openSelectedMenu(anchor?: Element): void {
+  const commit = commits.find((c) => c.hash === selected)
+  const row = selected ? rowOf(selected) : null
+  if (!commit || !row) return
+  const box = (anchor ?? row).getBoundingClientRect()
+  commitMenu(commit, { x: anchor ? box.right - 4 : box.left + graphWidth, y: box.bottom }, { returnFocus: listEl })
+}
+
+listEl.addEventListener('keydown', (event) => {
+  if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+    event.preventDefault()
+    openSelectedMenu()
+  }
+})
+
 rowsEl.addEventListener('mouseover', (event) => {
   const row = (event.target as Element).closest<HTMLElement>('.row')
   setHotRow(row ? commits.findIndex((c) => c.hash === row.dataset.hash) : -1)
@@ -725,7 +798,8 @@ listEl.addEventListener('keydown', (event) => {
 })
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && selected) {
+  // A menu or dialog that handled Escape already marked it.
+  if (event.key === 'Escape' && selected && !event.defaultPrevented) {
     select(null)
     listEl.focus()
   }

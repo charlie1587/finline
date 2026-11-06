@@ -1,12 +1,13 @@
-// Finline's worker: finds the focused workspace's repository, reads it with the system `git`
-// and watches its git dir so open panels refresh on their own.
+// Finline's worker: finds the focused workspace's repository, reads it with the system `git`,
+// runs the git actions the panel asks for, and watches the git dir so open panels refresh.
 import { watch, type FSWatcher } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { currentBranch, gitDirs, gitVersion, readCommitDetails, readCommits, remoteNames } from './git'
-import type { Candidate, DetailsLoad, GraphLoad } from './types'
+import { AUTH_FAILURE, buildArgs, CONFLICT, isRemoteAction } from './actions'
+import { currentBranch, gitDirs, gitVersion, readCommitDetails, readCommits, readStatus, remoteNames, runGit } from './git'
+import type { ActionResult, Candidate, DetailsLoad, GraphLoad, StatusLoad } from './types'
 
 const DEFAULT_LIMIT = 200
 // About 250 bytes of JSON per commit keeps a full page well under the 1 MiB answer cap.
@@ -16,8 +17,12 @@ const DEBOUNCE_MS = 300
 const MAX_FILES = 2000
 const HASH = /^[0-9a-f]{4,64}$/i
 // Paths under the git dir whose change means the graph may have changed.
+// Stopped merges, rebases and cherry-picks leave marker files there too.
 const RELEVANT =
-  /^(HEAD|ORIG_HEAD|FETCH_HEAD|packed-refs|index|refs[\\/].*|worktrees[\\/][^\\/]+[\\/](HEAD|index))$/
+  /^(packed-refs|refs[\\/].*|(worktrees[\\/][^\\/]+[\\/])?(HEAD|ORIG_HEAD|FETCH_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|index|rebase-merge|rebase-apply))$/
+// Remote actions wait on the network; local ones should be quick but a big rebase is not.
+const REMOTE_TIMEOUT_MS = 120_000
+const LOCAL_TIMEOUT_MS = 60_000
 
 type Resolved =
   | { ok: true; path: string; resolvedBy: string }
@@ -134,6 +139,60 @@ export default function activate(orca: OrcaWorkerApi): void {
     } catch (error) {
       return { ok: false, reason: 'git-failed', message: (error as Error).message }
     }
+  })
+
+  orca.panels.handle('repo.status', async ({ path }, { signal }): Promise<StatusLoad> => {
+    if (!served.has(path)) return { ok: false, message: 'Unknown repository; reload the graph.' }
+    try {
+      return { ok: true, status: await readStatus(path, signal) }
+    } catch (error) {
+      return { ok: false, message: (error as Error).message }
+    }
+  })
+
+  // One action at a time per repository: git takes its own locks, but two at once from the
+  // panel would only race each other.
+  const running = new Set<string>()
+
+  orca.panels.handle('git.run', async ({ path, action }, { signal }): Promise<ActionResult> => {
+    if (!served.has(path)) return { ok: false, reason: 'invalid', message: 'Unknown repository; reload the graph.' }
+    if (running.has(path)) return { ok: false, reason: 'invalid', message: 'Another git action is still running.' }
+    running.add(path)
+    try {
+      const built = buildArgs(action, { remotes: await remoteNames(path) })
+      if (!built.ok) return { ok: false, reason: 'invalid', message: built.message }
+      const remote = isRemoteAction(action)
+      orca.log(`git ${built.args.join(' ')}`)
+      const result = await runGit(path, built.args, { timeoutMs: remote ? REMOTE_TIMEOUT_MS : LOCAL_TIMEOUT_MS, signal })
+      const output = [result.stdout, result.stderr].map((s) => s.trim()).filter(Boolean).join('\n')
+      if (result.code === 0) return { ok: true, output }
+      if (result.timedOut) {
+        return { ok: false, reason: 'timeout', message: `git ${built.args[0]} took too long and was stopped.\n${output}` }
+      }
+      if (remote && AUTH_FAILURE.test(output)) return { ok: false, reason: 'auth', message: output }
+      if (CONFLICT.test(output)) return { ok: false, reason: 'conflict', message: output }
+      return { ok: false, reason: 'failed', message: output || `git ${built.args[0]} failed (exit ${result.code}).` }
+    } catch (error) {
+      return { ok: false, reason: 'failed', message: (error as Error).message }
+    } finally {
+      running.delete(path)
+    }
+  })
+
+  orca.panels.handle('git.terminal', async ({ path, action }) => {
+    if (!served.has(path)) return { ok: false, message: 'Unknown repository; reload the graph.' }
+    if (!isRemoteAction(action)) return { ok: false, message: 'Only fetch, pull and push run in a terminal.' }
+    const built = buildArgs(action, { remotes: await remoteNames(path) })
+    if (!built.ok) return { ok: false, message: built.message }
+    const { workspaces } = await orca.host.call('workspace.list', {})
+    const workspace = workspaces.find((w) => samePath(w.path, path))
+    if (!workspace) return { ok: false, message: 'No Orca workspace has this repository open.' }
+    // Every argument passed buildArgs' checks (names from a safe character set), so plain
+    // quoting is enough for any shell the terminal runs.
+    const quote = (arg: string) => (/^[\w.\/@:+=-]+$/.test(arg) ? arg : `"${arg}"`)
+    const command = ['git', ...built.args].map(quote).join(' ')
+    await orca.host.call('terminal.create', { workspaceId: workspace.id, title: `Finline: git ${built.args[0]}`, command })
+    return { ok: true }
   })
 
   orca.panels.handle('commit.details', async ({ path, hash }, { signal }): Promise<DetailsLoad> => {

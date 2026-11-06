@@ -1,7 +1,7 @@
 // Thin wrapper over the system `git`, run with execFile (no shell) so paths with spaces and
 // Windows drive letters pass through untouched.
 import { execFile } from 'node:child_process'
-import type { Commit, Ref } from './types'
+import type { Commit, CommitDetails, FileChange, FileStatus, Ref } from './types'
 
 const FIELD = '\x1f'
 const RECORD = '\x1e'
@@ -77,6 +77,75 @@ export async function readCommits(
         refs: parseRefs(refs, opts.remotes)
       }
     })
+}
+
+// hash, parents, author name/email/time, committer name/email/time, then the raw message last
+// (it may contain anything, so everything after the 8th separator is the message).
+const DETAILS_FORMAT = ['%H', '%P', '%an', '%ae', '%at', '%cn', '%ce', '%ct', '%B'].join('%x1f')
+const STATUSES = new Set<string>(['A', 'M', 'D', 'R', 'C', 'T', 'U', 'X'])
+
+/**
+ * Parses `git diff-tree -r -z --raw --numstat` output: every raw record first
+ * (`:modes shas status\0path\0[dst\0]`), then the numstat records in the same order
+ * (`added\tdeleted\tpath\0` or, for renames, `added\tdeleted\t\0src\0dst\0`).
+ */
+export function parseDiffTree(out: string): FileChange[] {
+  const tokens = out.split('\0')
+  const files: FileChange[] = []
+  const stats: Array<[number | null, number | null]> = []
+  let i = 0
+  while (i < tokens.length) {
+    const token = tokens[i++]
+    if (token === '') continue
+    if (token.startsWith(':')) {
+      const code = token.slice(1).split(' ')[4] ?? 'X'
+      const letter = code[0]
+      const status = (STATUSES.has(letter) ? letter : 'X') as FileStatus
+      const first = tokens[i++]
+      if (status === 'R' || status === 'C') files.push({ status, from: first, path: tokens[i++], added: null, deleted: null })
+      else files.push({ status, path: first, added: null, deleted: null })
+      continue
+    }
+    const [added, deleted, path] = token.split('\t')
+    if (path === '') i += 2 // rename: source and destination follow as their own tokens
+    const count = (n: string) => (n === '-' ? null : Number(n))
+    stats.push([count(added), count(deleted)])
+  }
+  stats.forEach(([added, deleted], n) => {
+    if (files[n]) Object.assign(files[n], { added, deleted })
+  })
+  return files
+}
+
+export async function readCommitDetails(
+  cwd: string,
+  hash: string,
+  maxFiles: number,
+  signal?: AbortSignal
+): Promise<CommitDetails> {
+  const out = await git(cwd, ['show', '-s', '--no-show-signature', `--format=${DETAILS_FORMAT}`, hash], signal)
+  const fields = out.split(FIELD)
+  const [full, parents, author, authorEmail, at, committer, committerEmail, ct] = fields
+  const parentList = parents ? parents.split(' ') : []
+  const comparedTo = parentList[0] ?? null
+  // Merges are compared with their first parent, the root commit with the empty tree.
+  const range = comparedTo ? [comparedTo, full] : ['--root', full]
+  const diff = await git(cwd, ['diff-tree', '-r', '-z', '-M', '--raw', '--numstat', '--no-commit-id', ...range], signal)
+  const files = parseDiffTree(diff)
+  return {
+    hash: full,
+    parents: parentList,
+    author,
+    authorEmail,
+    authoredAt: Number(at) * 1000,
+    committer,
+    committerEmail,
+    committedAt: Number(ct) * 1000,
+    message: fields.slice(8).join(FIELD).replace(/\s+$/, ''),
+    comparedTo,
+    files: files.slice(0, maxFiles),
+    filesTruncated: files.length > maxFiles
+  }
 }
 
 /** The worktree's own git dir (HEAD, index) and the shared one (refs, packed-refs). */

@@ -1,8 +1,8 @@
 // Finline graph panel: an isolated HTML frame that draws the commit graph in SVG beside the
 // commit list. It talks to the worker with orca.plugin.request and refreshes when the worker
 // posts `repo.changed` or Orca reports `workspace.changed`.
-import { edgePath, layoutGraph } from '../layout.ts'
-import type { Candidate, Commit, GraphLoad, Ref, RepoInfo } from '../types.ts'
+import { edgePath, layoutGraph, type Layout } from '../layout.ts'
+import type { Candidate, Commit, CommitDetails, DetailsLoad, FileChange, GraphLoad, Ref, RepoInfo } from '../types.ts'
 
 // The frame's window.orca; typings are unavailable on this Orca install, so declare what we use.
 interface Disposable {
@@ -36,6 +36,7 @@ const listEl = $<HTMLElement>('list')
 const graphEl = $<SVGSVGElement>('graph')
 const rowsEl = $<HTMLElement>('rows')
 const moreEl = $<HTMLElement>('more')
+const detailsEl = $<HTMLElement>('details')
 
 let repo: RepoInfo | null = null
 let commits: Commit[] = []
@@ -134,6 +135,8 @@ async function apply(result: GraphLoad, append: boolean): Promise<void> {
     repo = null
     commits = []
     hasMore = false
+    detailsCache.clear()
+    select(null)
     renderList()
     if (result.reason === 'ambiguous') showPicker(result.message, result.candidates)
     else showMessage(result.reason === 'no-workspace' ? 'No workspace' : 'No repository', result.message)
@@ -145,7 +148,8 @@ async function apply(result: GraphLoad, append: boolean): Promise<void> {
   commits = append ? commits.concat(result.commits) : result.commits
   hasMore = result.hasMore
   if (switched) {
-    selected = null
+    detailsCache.clear()
+    select(null)
     listEl.scrollTop = 0
   }
   hideMessage()
@@ -219,16 +223,34 @@ function renderHeader(): void {
   branchEl.textContent = repo?.branch ?? ''
 }
 
+let layout: Layout = layoutGraph([])
+let graphWidth = 0
+
 function renderList(): void {
-  const layout = layoutGraph(commits)
-  const graphWidth = PAD_X * 2 + Math.max(1, layout.width) * COL_W
+  layout = layoutGraph(commits)
+  graphWidth = PAD_X * 2 + Math.max(1, layout.width) * COL_W
+  if (commits.length === 0) {
+    rowsEl.replaceChildren(repo ? el('div', 'empty', 'No commits yet') : '')
+  } else {
+    rowsEl.replaceChildren(...commits.map((commit, row) => renderRow(commit, graphWidth, layout.colors[row])))
+  }
+  placeDetails()
+}
+
+/**
+ * Draws lanes and nodes. Rows below the expanded commit move down by the details' height, and
+ * the lanes run straight through it.
+ */
+function drawGraph(): void {
+  const open = selected && !detailsEl.hidden ? commits.findIndex((c) => c.hash === selected) : -1
+  const extra = open >= 0 ? detailsEl.offsetHeight : 0
   const x = (col: number) => PAD_X + col * COL_W + COL_W / 2
-  const y = (row: number) => row * ROW_H + ROW_H / 2
+  const y = (row: number) => row * ROW_H + ROW_H / 2 + (open >= 0 && row > open ? extra : 0)
 
   graphEl.setAttribute('width', String(graphWidth))
-  graphEl.setAttribute('height', String(commits.length * ROW_H + (hasMore ? ROW_H : 0)))
+  graphEl.setAttribute('height', String(commits.length * ROW_H + extra + (hasMore ? ROW_H : 0)))
   const paths = layout.edges.map((edge) =>
-    svg('path', { d: edgePath(edge, x, y), stroke: laneColor(edge.color) })
+    svg('path', { d: edgePath(edge, x, y, ROW_H), stroke: laneColor(edge.color) })
   )
   const nodes = commits.map((commit, row) => {
     const isHead = commit.refs.some((r) => r.kind === 'head' || r.kind === 'detached')
@@ -242,12 +264,6 @@ function renderList(): void {
     })
   })
   graphEl.replaceChildren(...paths, ...nodes)
-
-  if (commits.length === 0) {
-    rowsEl.replaceChildren(repo ? el('div', 'empty', 'No commits yet') : '')
-    return
-  }
-  rowsEl.replaceChildren(...commits.map((commit, row) => renderRow(commit, graphWidth, layout.colors[row])))
 }
 
 function renderRow(commit: Commit, indent: number, color: number): HTMLElement {
@@ -307,12 +323,249 @@ function shortAge(at: number): string {
 
 // ---- Interaction ---------------------------------------------------------------------------
 
+const rowOf = (hash: string) => rowsEl.querySelector<HTMLElement>(`.row[data-hash="${hash}"]`)
+
+/** Selects a commit (null closes the details); its details open in a row under it. */
 function select(hash: string | null): void {
+  const changed = hash !== selected
   selected = hash
-  for (const row of rowsEl.children as HTMLCollectionOf<HTMLElement>) {
+  for (const row of rowsEl.querySelectorAll<HTMLElement>('.row')) {
     row.setAttribute('aria-selected', String(row.dataset.hash === hash))
   }
+  if (!changed) return
+  placeDetails()
+  void loadDetails(selected)
 }
+
+/** Selects a commit and scrolls its row into view when it is loaded. */
+function reveal(hash: string): void {
+  select(hash)
+  rowOf(hash)?.scrollIntoView({ block: 'nearest' })
+}
+
+/** Puts the details right under the selected row, or hides them; then redraws the lanes. */
+function placeDetails(): void {
+  const row = selected ? rowOf(selected) : null
+  if (selected && !row) selected = null // gone after a refresh (rebased, branch deleted)
+  if (row) {
+    detailsEl.style.marginLeft = `${graphWidth}px`
+    row.after(detailsEl)
+    detailsEl.hidden = false
+  } else {
+    detailsEl.hidden = true
+    detailsEl.replaceChildren()
+  }
+  drawGraph()
+}
+
+// ---- Commit details ------------------------------------------------------------------------
+// A commit's details never change, so they are cached per hash until the repo switches.
+
+const detailsCache = new Map<string, CommitDetails>()
+let detailsSeq = 0
+
+async function loadDetails(hash: string | null): Promise<void> {
+  const mine = ++detailsSeq
+  if (!hash || !repo) return
+  const cached = detailsCache.get(hash)
+  if (cached) {
+    renderDetails(cached)
+    return
+  }
+  renderDetailsMessage('pending', 'Loading…')
+  try {
+    const result: DetailsLoad = await orca.plugin.request('commit.details', { path: repo.path, hash })
+    if (mine !== detailsSeq) return
+    if (!result.ok) {
+      renderDetailsMessage('error', result.message)
+      return
+    }
+    detailsCache.set(hash, result.details)
+    renderDetails(result.details)
+  } catch (error) {
+    if (mine !== detailsSeq) return
+    const e = error as { code?: string; message?: string }
+    renderDetailsMessage('error', `${e.code ?? 'error'}: ${e.message ?? String(error)}`)
+  }
+}
+
+function closeButton(): HTMLElement {
+  const close = el('button', 'icon details-close')
+  close.type = 'button'
+  close.title = 'Close (Esc)'
+  close.setAttribute('aria-label', 'Close commit details')
+  const glyph = svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true' })
+  glyph.append(svg('path', { d: 'M4 4l8 8M12 4l-8 8' }))
+  close.append(glyph)
+  close.addEventListener('click', () => {
+    select(null)
+    listEl.focus()
+  })
+  return close
+}
+
+function renderDetailsMessage(tone: 'pending' | 'error', text: string): void {
+  detailsEl.replaceChildren(closeButton(), el('p', tone, text))
+}
+
+/** Two columns when there is room (commit info | changed files), stacked in the sidebar. */
+function renderDetails(d: CommitDetails): void {
+  const info = el('div', 'details-info')
+  const meta = el('dl', 'details-meta')
+  const field = (label: string, ...value: Node[]) => {
+    const dd = el('dd', '')
+    dd.append(...value)
+    meta.append(el('dt', '', `${label}:`), dd)
+  }
+  field('Commit', el('span', 'mono', d.hash))
+  if (d.parents.length > 0) field(d.parents.length > 1 ? 'Parents' : 'Parent', ...d.parents.map(parentLink))
+  field('Author', ...person(d.author, d.authorEmail))
+  field('Author Date', el('span', '', fullDate(d.authoredAt)))
+  field('Committer', ...person(d.committer, d.committerEmail))
+  field('Committer Date', el('span', '', fullDate(d.committedAt)))
+  info.append(meta, el('pre', 'details-message', d.message))
+
+  const grid = el('div', 'details-grid')
+  grid.append(info, renderFiles(d))
+  detailsEl.replaceChildren(closeButton(), grid)
+}
+
+function person(name: string, email: string): Node[] {
+  return email ? [el('span', '', name), el('span', 'email', ` <${email}>`)] : [el('span', '', name)]
+}
+
+/** e.g. "Wed Nov 04 2026 09:47:31 GMT+0100 (Central European Standard Time)" */
+const fullDate = (at: number) => new Date(at).toString()
+
+function parentLink(hash: string): HTMLElement {
+  const link = el('button', 'parent mono', hash)
+  link.type = 'button'
+  link.title = commits.some((c) => c.hash === hash) ? 'Show this commit' : 'Not loaded yet: scroll down to load it'
+  link.addEventListener('click', () => reveal(hash))
+  return link
+}
+
+// ---- Changed files as a folder tree ----------------------------------------------------------
+
+interface Folder {
+  name: string
+  folders: Map<string, Folder>
+  files: FileChange[]
+}
+
+function buildTree(files: FileChange[]): Folder {
+  const root: Folder = { name: '', folders: new Map(), files: [] }
+  for (const file of files) {
+    let folder = root
+    for (const part of file.path.split('/').slice(0, -1)) {
+      let next = folder.folders.get(part)
+      if (!next) {
+        next = { name: part, folders: new Map(), files: [] }
+        folder.folders.set(part, next)
+      }
+      folder = next
+    }
+    folder.files.push(file)
+  }
+  return root
+}
+
+/** A folder whose only content is one folder merges into it: `apps / web / src`. */
+function compact(folder: Folder): { label: string; folder: Folder } {
+  const names = [folder.name]
+  while (folder.files.length === 0 && folder.folders.size === 1) {
+    folder = folder.folders.values().next().value as Folder
+    names.push(folder.name)
+  }
+  return { label: names.join(' / '), folder }
+}
+
+const STATUS_NAMES: Record<FileChange['status'], string> = {
+  A: 'Added',
+  M: 'Modified',
+  D: 'Deleted',
+  R: 'Renamed',
+  C: 'Copied',
+  T: 'Type changed',
+  U: 'Unmerged',
+  X: 'Changed'
+}
+
+const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' })
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+/** Folders first, then files, each by name; every folder folds on click. */
+function renderFolderContents(folder: Folder): HTMLElement {
+  const list = el('ul', 'tree')
+  for (const child of [...folder.folders.values()].sort((a, b) => byName(a.name, b.name))) {
+    const { label, folder: shown } = compact(child)
+    const item = el('li', '')
+    const toggle = el('button', 'tree-row folder')
+    toggle.type = 'button'
+    toggle.setAttribute('aria-expanded', 'true')
+    toggle.append(treeIcon('folder'), el('span', 'name', label))
+    const contents = renderFolderContents(shown)
+    toggle.addEventListener('click', () => {
+      const open = toggle.getAttribute('aria-expanded') !== 'true'
+      toggle.setAttribute('aria-expanded', String(open))
+      contents.hidden = !open
+    })
+    item.append(toggle, contents)
+    list.append(item)
+  }
+  for (const file of [...folder.files].sort((a, b) => byName(baseName(a.path), baseName(b.path)))) {
+    list.append(renderFile(file))
+  }
+  return list
+}
+
+function renderFile(file: FileChange): HTMLElement {
+  const item = el('li', `tree-row file s-${file.status}`)
+  item.title = `${STATUS_NAMES[file.status]}: ${file.from ? `${file.from} → ${file.path}` : file.path}`
+  item.append(treeIcon('file'), el('span', 'name', baseName(file.path)))
+  if (file.from) item.append(el('span', 'from', `← ${file.from}`))
+  if (file.added !== null) {
+    const stat = el('span', 'stat')
+    stat.append('(', el('span', 'plus', `+${file.added}`), ' | ', el('span', 'minus', `-${file.deleted}`), ')')
+    item.append(stat)
+  } else {
+    item.append(el('span', 'stat', 'binary'))
+  }
+  return item
+}
+
+function treeIcon(kind: 'folder' | 'file'): SVGSVGElement {
+  const node = svg('svg', { viewBox: '0 0 16 16', class: `tree-icon ${kind}`, 'aria-hidden': 'true' })
+  node.append(svg('path', { d: kind === 'folder' ? 'M1.5 3.5h5l1.5 1.5h6.5v8h-13z' : 'M3.5 1.5h6l3 3v10h-9z' }))
+  return node
+}
+
+function renderFiles(d: CommitDetails): HTMLElement {
+  const section = el('div', 'details-files')
+  const added = d.files.reduce((sum, f) => sum + (f.added ?? 0), 0)
+  const deleted = d.files.reduce((sum, f) => sum + (f.deleted ?? 0), 0)
+  const head = el('div', 'files-head')
+  const count = `${d.files.length}${d.filesTruncated ? '+' : ''} ${d.files.length === 1 ? 'file' : 'files'}`
+  head.append(el('span', '', count), el('span', 'plus', `+${added}`), el('span', 'minus', `-${deleted}`))
+  if (d.parents.length > 1 && d.comparedTo) {
+    const against = el('span', 'against', `vs ${d.comparedTo.slice(0, 7)}`)
+    against.title = 'A merge is compared with its first parent'
+    head.append(against)
+  }
+  section.append(head)
+  if (d.files.length === 0) {
+    section.append(el('p', 'pending', 'No file changes.'))
+    return section
+  }
+  section.append(renderFolderContents(buildTree(d.files)))
+  if (d.filesTruncated) section.append(el('p', 'pending', `Only the first ${d.files.length} files are listed.`))
+  return section
+}
+
+// The details change height as they load, wrap or fold folders: keep the lanes in step.
+new ResizeObserver(() => {
+  if (!detailsEl.hidden) drawGraph()
+}).observe(detailsEl)
 
 function maybeLoadMore(): void {
   if (listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - ROW_H * 10) void loadMore()
@@ -320,7 +573,8 @@ function maybeLoadMore(): void {
 
 rowsEl.addEventListener('click', (event) => {
   const row = (event.target as Element).closest<HTMLElement>('.row')
-  if (row?.dataset.hash) select(row.dataset.hash)
+  // Clicking the open commit again folds its details.
+  if (row?.dataset.hash) select(row.dataset.hash === selected ? null : row.dataset.hash)
 })
 
 listEl.addEventListener('keydown', (event) => {
@@ -329,8 +583,14 @@ listEl.addEventListener('keydown', (event) => {
   const index = commits.findIndex((c) => c.hash === selected)
   const next = Math.min(commits.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))
   if (!commits[next]) return
-  select(commits[next].hash)
-  rowsEl.children[next]?.scrollIntoView({ block: 'nearest' })
+  reveal(commits[next].hash)
+})
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && selected) {
+    select(null)
+    listEl.focus()
+  }
 })
 
 listEl.addEventListener('scroll', maybeLoadMore, { passive: true })

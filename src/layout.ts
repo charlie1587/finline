@@ -98,23 +98,44 @@ export function layoutGraph(commits: readonly LayoutCommit[]): Layout {
 /**
  * SVG path for an edge. `x(col)` and `y(row)` give node centres. The edge leaves its node,
  * bends into its lane within one row, runs straight, and bends into the parent in the last row.
+ * When two adjacent rows are further apart than `bend` (an expanded row sits between them), a
+ * bend still takes only `bend` pixels: right under the node when leaving it, just above the
+ * parent when arriving, with a straight run through the gap.
  */
-export function edgePath(edge: Edge, x: (col: number) => number, y: (row: number) => number): string {
+export function edgePath(
+  edge: Edge,
+  x: (col: number) => number,
+  y: (row: number) => number,
+  bend = Infinity
+): string {
   const { fromRow, fromCol, toRow, toCol, lane } = edge
-  const curve = (c1: number, r1: number, c2: number, r2: number) => {
-    const ym = (y(r1) + y(r2)) / 2
-    return `C ${x(c1)} ${ym} ${x(c2)} ${ym} ${x(c2)} ${y(r2)}`
+  const curve = (c1: number, r1: number, c2: number, r2: number, early: boolean) => {
+    let y1 = y(r1)
+    let y2 = y(r2)
+    let before = ''
+    let after = ''
+    if (y2 - y1 > bend) {
+      if (early) {
+        after = ` L ${x(c2)} ${y2}`
+        y2 = y1 + bend
+      } else {
+        y1 = y2 - bend
+        before = `L ${x(c1)} ${y1} `
+      }
+    }
+    const ym = (y1 + y2) / 2
+    return `${before}C ${x(c1)} ${ym} ${x(c2)} ${ym} ${x(c2)} ${y2}${after}`
   }
   let d = `M ${x(fromCol)} ${y(fromRow)}`
   let row = fromRow
   if (lane !== fromCol) {
-    if (toRow - fromRow === 1) return `${d} ${curve(fromCol, fromRow, toCol, toRow)}`
-    d += ` ${curve(fromCol, fromRow, lane, fromRow + 1)}`
+    if (toRow - fromRow === 1) return `${d} ${curve(fromCol, fromRow, toCol, toRow, true)}`
+    d += ` ${curve(fromCol, fromRow, lane, fromRow + 1, true)}`
     row = fromRow + 1
   }
   if (lane !== toCol) {
     if (toRow - 1 > row) d += ` L ${x(lane)} ${y(toRow - 1)}`
-    d += ` ${curve(lane, toRow - 1, toCol, toRow)}`
+    d += ` ${curve(lane, toRow - 1, toCol, toRow, false)}`
   } else {
     d += ` L ${x(toCol)} ${y(toRow)}`
   }

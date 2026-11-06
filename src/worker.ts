@@ -5,13 +5,16 @@ import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { currentBranch, gitDirs, gitVersion, readCommits, remoteNames } from './git'
-import type { Candidate, GraphLoad } from './types'
+import { currentBranch, gitDirs, gitVersion, readCommitDetails, readCommits, remoteNames } from './git'
+import type { Candidate, DetailsLoad, GraphLoad } from './types'
 
 const DEFAULT_LIMIT = 200
 // About 250 bytes of JSON per commit keeps a full page well under the 1 MiB answer cap.
 const MAX_LIMIT = 1000
 const DEBOUNCE_MS = 300
+// About 100 bytes of JSON per file; a huge commit lists the first ones and says it was cut.
+const MAX_FILES = 2000
+const HASH = /^[0-9a-f]{4,64}$/i
 // Paths under the git dir whose change means the graph may have changed.
 const RELEVANT =
   /^(HEAD|ORIG_HEAD|FETCH_HEAD|packed-refs|index|refs[\\/].*|worktrees[\\/][^\\/]+[\\/](HEAD|index))$/
@@ -75,6 +78,8 @@ let watcher: FSWatcher | null = null
 export default function activate(orca: OrcaWorkerApi): void {
   let watchedPath: string | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
+  // Repos graph.load has resolved: commit.details runs git only in one of these.
+  const served = new Set<string>()
 
   async function watchRepo(path: string): Promise<boolean> {
     if (watchedPath === path && watcher) return true
@@ -116,6 +121,7 @@ export default function activate(orca: OrcaWorkerApi): void {
         readCommits(resolved.path, { skip: from, limit: max + 1, remotes }, signal)
       ])
       const watching = await watchRepo(resolved.path)
+      served.add(resolved.path)
       return {
         ok: true,
         repo: { path: resolved.path, name: basename(resolved.path), branch, gitVersion: version },
@@ -127,6 +133,16 @@ export default function activate(orca: OrcaWorkerApi): void {
       }
     } catch (error) {
       return { ok: false, reason: 'git-failed', message: (error as Error).message }
+    }
+  })
+
+  orca.panels.handle('commit.details', async ({ path, hash }, { signal }): Promise<DetailsLoad> => {
+    if (!served.has(path)) return { ok: false, message: 'Unknown repository; reload the graph.' }
+    if (!HASH.test(hash)) return { ok: false, message: `Not a commit hash: ${hash}` }
+    try {
+      return { ok: true, details: await readCommitDetails(path, hash, MAX_FILES, signal) }
+    } catch (error) {
+      return { ok: false, message: (error as Error).message }
     }
   })
 }

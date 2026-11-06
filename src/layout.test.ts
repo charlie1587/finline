@@ -1,7 +1,7 @@
 // node --test src/layout.test.ts   (Node >= 22.18 strips the types itself)
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { layoutGraph, type LayoutCommit } from './layout.ts'
+import { edgePath, layoutGraph, type LayoutCommit } from './layout.ts'
 
 const c = (hash: string, ...parents: string[]): LayoutCommit => ({ hash, parents })
 
@@ -45,4 +45,25 @@ test('freed lanes are reused', () => {
   const layout = layoutGraph([c('t1', 'p'), c('t2', 'p'), c('p', 'q'), c('t3', 'q'), c('q')])
   assert.deepEqual(layout.cols, [0, 1, 0, 1, 0])
   assert.equal(layout.width, 2)
+})
+
+test('a bend across an expanded row stays one row tall, at the node it leaves or reaches', () => {
+  const x = (col: number) => col * 10
+  // Rows 0 and 1 are 24px apart; a 100px details pane sits between rows 1 and 2.
+  const y = (row: number) => row * 24 + (row > 1 ? 100 : 0)
+  const leaving = { fromRow: 1, fromCol: 0, toRow: 3, toCol: 0, lane: 1, color: 0 }
+  // Leaves row 1 (y 24), bends to lane 1 by y 48, runs straight through the pane to row 2 (y 148),
+  // then bends back into the parent at row 3 (y 172).
+  assert.equal(
+    edgePath(leaving, x, y, 24),
+    'M 0 24 C 0 36 10 36 10 48 L 10 148 C 10 160 0 160 0 172'
+  )
+  const arriving = { fromRow: 0, fromCol: 0, toRow: 2, toCol: 0, lane: 1, color: 0 }
+  // Bends out by row 1 (y 24), runs straight to 24px above the parent at row 2 (y 148), bends in.
+  assert.equal(
+    edgePath(arriving, x, y, 24),
+    'M 0 0 C 0 12 10 12 10 24 L 10 124 C 10 136 0 136 0 148'
+  )
+  // Without a bend limit the old shape comes back: the curve spans the whole gap.
+  assert.equal(edgePath(arriving, x, y), 'M 0 0 C 0 12 10 12 10 24 C 10 86 0 86 0 148')
 })

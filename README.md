@@ -23,9 +23,11 @@
 - Follows the focused Orca workspace and refreshes by itself when HEAD, branches, tags or the
   index change, from Orca, a terminal or an agent.
 - Loads 200 commits at a time as you scroll.
+- Click a commit to open its details under it: hash, parents, author and committer, the full
+  message, and the changed files as a folder tree with line counts.
 - Fits the narrow sidebar: author and hash columns appear only when there is room.
 
-Finline 0.1 is read-only. Commit details, diffs and actions (checkout, merge, rebase, cherry-pick,
+Finline 0.1 is read-only. Diffs and actions (checkout, merge, rebase, cherry-pick,
 branches and tags) are planned.
 
 ## Install
@@ -58,7 +60,7 @@ Finline makes no network requests and collects no data.
 
 ```sh
 orca plugin dev watch .                # load this folder into Orca and stream its logs
-node --test src/layout.test.ts         # lane layout tests (Node >= 22.18)
+node --test src/*.test.ts              # layout and git parser tests (Node >= 22.18)
 orca plugin validate .                 # the catalog's manifest checks
 ```
 

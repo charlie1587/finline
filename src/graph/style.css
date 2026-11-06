@@ -15,6 +15,10 @@
   --border: var(--orca-border, #333);
   --hover: color-mix(in srgb, var(--fg) 6%, transparent);
   --selected: color-mix(in srgb, var(--orca-primary, #3b82f6) 22%, transparent);
+  /* Surfaces: small steps of the text colour over the background, so they suit either theme. */
+  --surface-1: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  --surface-2: color-mix(in srgb, var(--fg) 6%, var(--bg));
+  --surface-line: color-mix(in srgb, var(--fg) 10%, var(--bg));
 }
 
 * {
@@ -296,6 +300,250 @@ button {
 .more {
   padding: 8px 12px;
   color: var(--muted);
+}
+
+/* ---- Commit details: an expanded row under the selected commit ---- */
+/* Indented by the graph's width (set inline) so the lanes run through it on the left. */
+
+.details {
+  position: relative;
+  container-type: inline-size;
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  padding: 8px 36px 8px 8px;
+  border-top: 1px solid var(--surface-line);
+  border-bottom: 1px solid var(--surface-line);
+  background: var(--surface-1);
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.details-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Cards: metadata, message and files each sit on a slightly lighter surface. */
+.details-meta,
+.details-message,
+.details-files {
+  padding: 8px 10px;
+  border: 1px solid var(--surface-line);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+/* Side by side once there is room for both, as in a wide editor tab. */
+@container (min-width: 620px) {
+  .details-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.details-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.details > .pending,
+.details > .error {
+  margin: 0;
+}
+
+.mono {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+}
+
+.details-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1px 6px;
+  margin: 0;
+}
+
+.details-meta dt {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.details-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Narrow (the sidebar): each label sits above its value, so values get the full width. */
+@container (max-width: 419px) {
+  .details-meta {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .details-meta dt {
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .details-meta dd + dt {
+    margin-top: 6px;
+  }
+}
+
+.details-meta .email {
+  color: var(--muted);
+}
+
+.details-message {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.parent {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--orca-primary, #3b82f6);
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.files-head {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  margin: -2px 0 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--surface-line);
+}
+
+.files-head .against {
+  margin-left: auto;
+}
+
+.plus {
+  color: var(--lane-2);
+}
+
+.minus {
+  color: var(--lane-7);
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree .tree {
+  padding-left: 16px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  white-space: nowrap;
+}
+
+button.tree-row {
+  cursor: pointer;
+}
+
+.tree-row {
+  border-radius: 4px;
+}
+
+.tree-row:hover {
+  background: var(--hover);
+}
+
+button.tree-row:hover .name {
+  text-decoration: underline;
+}
+
+.tree-row .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.tree-icon.folder {
+  fill: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+
+.folder[aria-expanded='false'] .tree-icon {
+  fill: none;
+}
+
+.tree-row .from,
+.tree-row .stat {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tree-row .from {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file.s-A .name {
+  color: var(--lane-2);
+}
+
+.file.s-D .name {
+  color: var(--lane-7);
+  text-decoration: line-through;
+}
+
+.file.s-R .name,
+.file.s-C .name {
+  color: var(--lane-0);
+}
+
+.file.s-U .name {
+  color: var(--lane-1);
+}
+
+.details .pending {
+  margin: 0;
+  color: var(--muted);
+}
+
+.details .error {
+  margin: 0;
+  color: var(--orca-destructive, #ef4444);
 }
 
 .empty {

@@ -11,7 +11,7 @@ Orca's plugin docs live in `stablyai/orca` under `docs/reference/`: `plugin-auth
 ## Commands
 
 ```sh
-node --test src/layout.test.ts                                   # lane layout tests (Node >= 22.18 strips types)
+node --test src/*.test.ts                                        # layout and git parser tests (Node >= 22.18 strips types)
 node --test --test-name-pattern="merge" src/layout.test.ts       # a single test
 orca plugin validate .                                           # manifest checks the catalog runs
 orca plugin dev load . [--approve <fingerprint>]                 # load as dev plugin `local.finline`
@@ -31,6 +31,7 @@ Two processes talk through a typed request/post contract (`src/protocol.ts`, whi
 
 **Worker** (`src/worker.ts`, `execution: trusted-worker`, a Node process):
 - `graph.load {limit, skip, preferredPath?}` resolves the repo, then runs the system `git` through `src/git.ts` (`execFile`, no shell). It returns one page of `git log --all --topo-order` and fetches `limit + 1` commits to compute `hasMore`.
+- `commit.details {path, hash}` returns one commit's full message, author and committer, and its changed files from `git diff-tree --raw --numstat -M` against the first parent (`--root` for a root commit). It runs only in a path `graph.load` has served and only for hex hashes.
 - **Repo resolution is a workaround.** `workspace.readContext` gives only `displayName`, `branch` and terminal ids, with no path or id. The worker matches it against `workspace.list` by name and branch. Worktree workspaces are named after their branch, so two repos on the same branch collide. In that case it returns `reason: 'ambiguous'` with candidates, and the panel sends back `preferredPath`. Local workspaces have `hostId: "local"`, not `null`.
 - It keeps one `fs.watch(commonDir, {recursive: true})` on the repo's git common dir, which also covers `worktrees/<name>/HEAD|index`. It filters to HEAD, refs, packed-refs and index (ignoring `.lock`), debounces, and posts `repo.changed` to panels.
 - Refs come back typed (`head | branch | remote | tag | detached`) by matching `%D` decorations against `git remote` names. `<remote>/HEAD` is dropped.
@@ -39,13 +40,14 @@ Two processes talk through a typed request/post contract (`src/protocol.ts`, whi
 - It must be an html panel: components panels (`ui: "components"`) can't draw SVG or canvas.
 - `main.ts` holds all commits loaded so far, re-runs the layout over the full list on every change, and re-renders the SVG plus the DOM rows (built with `createElement`, never `innerHTML`).
 - Refresh triggers: worker `repo.changed`, `workspace.changed`, and an explicit load in setup. The panel does not get the documented initial `workspace.changed` delivery.
+- Clicking a commit opens its details as an expanded row right under it (`#details`, moved into `#rows`). The graph pushes the rows below down by the details' height (a `ResizeObserver` redraws it). Details are cached per hash until the repo switches.
 - Paging is triggered by scroll. Refresh reloads `max(PAGE, loaded)` from the top, and a `seq` counter discards stale answers.
 - The ambiguous-repo choice is pinned in `localStorage`, keyed by every current terminal id (unique per workspace), and propagated to new terminals on each pinned load. Atoms with `persist: 'workspace'` exist only for components panels.
 
 **Layout** (`src/layout.ts`, pure, shared by panel and tests): one pass over topo-ordered commits, keeping `lanes[]` (the hash each lane is heading to).
 - A commit takes the first lane expecting it, or a free lane. Other lanes expecting it converge and are freed.
 - The first parent always continues the commit's lane and colour. Other parents reuse a lane already heading there, or open one.
-- Edges whose parent isn't loaded end at `toRow = rows`. `edgePath` turns an edge into SVG: bend into the lane, run straight, bend into the parent.
+- Edges whose parent isn't loaded end at `toRow = rows`. `edgePath` turns an edge into SVG: bend into the lane, run straight, bend into the parent. With a `bend` limit each bend stays one row tall, so lanes run straight through an expanded row.
 
 ## Gotchas
 

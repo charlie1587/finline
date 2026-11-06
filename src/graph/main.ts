@@ -413,18 +413,26 @@ function reveal(hash: string, jump = false): void {
 
 /** Set while the details open under a new row, so their first content grows from zero. */
 let detailsOpening = false
+/** The commit the details pane shows. A refresh re-creates the rows but keeps this content. */
+let detailsFor: string | null = null
 
 /** Puts the details right under the selected row, or folds them away; then redraws the lanes. */
 function placeDetails(): void {
   const row = selected ? rowOf(selected) : null
   if (selected && !row) selected = null // gone after a refresh (rebased, branch deleted)
   if (row) {
-    if (detailsEl.hidden || detailsEl.previousElementSibling !== row) {
+    if (detailsEl.hidden || detailsFor !== selected) {
+      detailsFor = selected
       // Collapsed until its first content arrives, then it grows to fit (morphDetails).
       detailsOpening = true
       for (const running of detailsEl.getAnimations()) running.cancel()
       detailsEl.replaceChildren()
       detailsEl.style.height = '0px'
+    } else if (detailsEl.getAnimations().length > 0) {
+      // Reopened while folding: grow back from where it is instead of finishing the fold.
+      const from = detailsEl.offsetHeight
+      for (const running of detailsEl.getAnimations()) running.cancel()
+      tweenHeight(detailsEl, from, detailsEl.offsetHeight)
     }
     detailsEl.style.marginLeft = `${graphWidth}px`
     row.after(detailsEl)
@@ -444,6 +452,7 @@ function placeDetails(): void {
 function hideDetails(): void {
   for (const running of detailsEl.getAnimations()) running.cancel()
   detailsOpening = false
+  detailsFor = null
   detailsEl.style.height = ''
   detailsEl.hidden = true
   detailsEl.replaceChildren()

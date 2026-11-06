@@ -551,3 +551,157 @@ button.tree-row:hover .name {
   color: var(--muted);
   text-align: center;
 }
+
+/* ---- Motion: short and eased; prefers-reduced-motion turns it all off (end of file) ---- */
+
+:root {
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --flash: color-mix(in srgb, var(--orca-primary, #3b82f6) 30%, transparent);
+}
+
+.row,
+.tree-row,
+.message button,
+.icon {
+  transition: background-color 120ms ease-out;
+}
+
+.icon:active:not(:disabled),
+.parent:active,
+.message button:active {
+  transform: scale(0.94);
+}
+
+.icon,
+.parent,
+.message button {
+  transition:
+    background-color 120ms ease-out,
+    transform 80ms ease-out;
+}
+
+/* Nodes: grow under the pointer, and the open commit's node keeps a halo. */
+.graph circle {
+  transition:
+    r 140ms var(--ease-out),
+    stroke-width 140ms var(--ease-out);
+}
+
+.graph circle.hot {
+  r: 5.5px;
+}
+
+.graph circle.picked {
+  r: 5.5px;
+  stroke-width: 4;
+  stroke-opacity: 0.55;
+  paint-order: stroke;
+}
+
+/* A new list slides in row by row (JS staggers the delay). */
+.row.enter {
+  animation: row-in 260ms var(--ease-out) both;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* Commits that arrived with a refresh, and the target of a parent link, light up briefly. */
+.row.fresh {
+  animation: flash 1200ms ease-out;
+}
+
+.row.flash {
+  animation: flash 900ms ease-out;
+}
+
+@keyframes flash {
+  from {
+    background-color: var(--flash);
+  }
+}
+
+/* Details content fades up as the pane grows around it. */
+.details-grid > *,
+.details > p {
+  animation: fade-up 220ms var(--ease-out) both;
+}
+
+.details-files {
+  animation-delay: 40ms;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+.details-close svg {
+  transition: transform 200ms var(--ease-out);
+}
+
+.details-close:hover svg {
+  transform: rotate(90deg);
+}
+
+/* Folder chevrons turn as folders fold. */
+.chevron {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-right: -2px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform: rotate(90deg);
+  transition: transform 160ms var(--ease-out);
+}
+
+.folder[aria-expanded='false'] .chevron {
+  transform: rotate(0deg);
+}
+
+.tree-icon {
+  transition: fill 160ms ease-out;
+}
+
+.message:not([hidden]) {
+  animation: fade-up 220ms var(--ease-out) both;
+}
+
+.more:not([hidden]) {
+  animation: pulse 1200ms ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.ref {
+  transition: background-color 120ms ease-out;
+}
+
+.row:hover .ref {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

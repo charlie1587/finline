@@ -144,6 +144,7 @@ async function apply(result: GraphLoad, append: boolean): Promise<void> {
   }
   if (result.resolvedBy.startsWith('pinned')) await pin(result.repo.path) // new terminals inherit it
   const switched = repo?.path !== result.repo.path
+  const shown = new Set(switched ? [] : commits.map((c) => c.hash))
   repo = result.repo
   commits = append ? commits.concat(result.commits) : result.commits
   hasMore = result.hasMore
@@ -155,8 +156,26 @@ async function apply(result: GraphLoad, append: boolean): Promise<void> {
   hideMessage()
   renderHeader()
   renderList()
+  if (!append) animateArrivals(shown)
   // A short page may not fill the list; keep loading until it scrolls.
   queueMicrotask(maybeLoadMore)
+}
+
+/**
+ * A fresh list (first load, another repo) slides in row by row from the top; on a refresh,
+ * only commits that were not shown before light up briefly.
+ */
+function animateArrivals(shown: Set<string>): void {
+  if (!moving()) return
+  const rows = [...rowsEl.querySelectorAll<HTMLElement>('.row')]
+  if (shown.size === 0) {
+    rows.slice(0, 40).forEach((row, i) => {
+      row.style.animationDelay = `${i * 12}ms`
+      row.classList.add('enter')
+    })
+    return
+  }
+  for (const row of rows) if (!shown.has(row.dataset.hash ?? '')) row.classList.add('fresh')
 }
 
 function setLoading(on: boolean): void {
@@ -223,8 +242,37 @@ function renderHeader(): void {
   branchEl.textContent = repo?.branch ?? ''
 }
 
+// ---- Motion --------------------------------------------------------------------------------
+// Short, eased and skipped entirely when the system asks for reduced motion.
+
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
+const moving = () => !reducedMotion.matches
+const EASE = 'cubic-bezier(0.2, 0.8, 0.2, 1)'
+
+/** Animates a height change; with `keep`, the end height holds until the caller cancels. */
+function tweenHeight(node: HTMLElement, from: number, to: number, keep = false, duration = 200): Animation | null {
+  for (const running of node.getAnimations()) running.cancel()
+  if (!moving() || Math.abs(from - to) < 1) return null
+  return node.animate(
+    [
+      { height: `${from}px`, overflow: 'hidden' },
+      { height: `${to}px`, overflow: 'hidden' }
+    ],
+    { duration, easing: EASE, fill: keep ? 'forwards' : 'none' }
+  )
+}
+
+/** Restarts a one-shot CSS animation class on an element. */
+function replay(node: Element, cls: string): void {
+  node.classList.remove(cls)
+  void (node as HTMLElement).offsetWidth
+  node.classList.add(cls)
+}
+
 let layout: Layout = layoutGraph([])
 let graphWidth = 0
+let nodeEls: SVGCircleElement[] = []
+let hotRow = -1
 
 function renderList(): void {
   layout = layoutGraph(commits)
@@ -242,7 +290,9 @@ function renderList(): void {
  * the lanes run straight through it.
  */
 function drawGraph(): void {
-  const open = selected && !detailsEl.hidden ? commits.findIndex((c) => c.hash === selected) : -1
+  // Follow where the details actually are, not the selection: they stay put while closing.
+  const anchor = detailsEl.hidden ? undefined : (detailsEl.previousElementSibling as HTMLElement | null)?.dataset.hash
+  const open = anchor ? commits.findIndex((c) => c.hash === anchor) : -1
   const extra = open >= 0 ? detailsEl.offsetHeight : 0
   const x = (col: number) => PAD_X + col * COL_W + COL_W / 2
   const y = (row: number) => row * ROW_H + ROW_H / 2 + (open >= 0 && row > open ? extra : 0)
@@ -252,18 +302,29 @@ function drawGraph(): void {
   const paths = layout.edges.map((edge) =>
     svg('path', { d: edgePath(edge, x, y, ROW_H), stroke: laneColor(edge.color) })
   )
-  const nodes = commits.map((commit, row) => {
+  nodeEls = commits.map((commit, row) => {
     const isHead = commit.refs.some((r) => r.kind === 'head' || r.kind === 'detached')
-    return svg('circle', {
+    const node = svg('circle', {
       cx: x(layout.cols[row]),
       cy: y(row),
       r: isHead ? NODE_R + 1 : NODE_R,
-      class: isHead ? 'head' : '',
       fill: laneColor(layout.colors[row]),
       stroke: laneColor(layout.colors[row])
     })
+    node.classList.toggle('head', isHead)
+    node.classList.toggle('hot', row === hotRow)
+    node.classList.toggle('picked', commit.hash === selected)
+    return node
   })
-  graphEl.replaceChildren(...paths, ...nodes)
+  graphEl.replaceChildren(...paths, ...nodeEls)
+}
+
+/** Grows the node of the row under the pointer. */
+function setHotRow(row: number): void {
+  if (row === hotRow) return
+  nodeEls[hotRow]?.classList.remove('hot')
+  hotRow = row
+  nodeEls[hotRow]?.classList.add('hot')
 }
 
 function renderRow(commit: Commit, indent: number, color: number): HTMLElement {
@@ -332,30 +393,70 @@ function select(hash: string | null): void {
   for (const row of rowsEl.querySelectorAll<HTMLElement>('.row')) {
     row.setAttribute('aria-selected', String(row.dataset.hash === hash))
   }
+  nodeEls.forEach((node, i) => node.classList.toggle('picked', commits[i]?.hash === hash))
   if (!changed) return
   placeDetails()
   void loadDetails(selected)
 }
 
-/** Selects a commit and scrolls its row into view when it is loaded. */
-function reveal(hash: string): void {
+/**
+ * Selects a commit and scrolls its row into view when it is loaded. `jump` (a parent link)
+ * scrolls smoothly and flashes the row so the eye lands on it.
+ */
+function reveal(hash: string, jump = false): void {
   select(hash)
-  rowOf(hash)?.scrollIntoView({ block: 'nearest' })
+  const row = rowOf(hash)
+  if (!row) return
+  row.scrollIntoView({ block: 'nearest', behavior: jump && moving() ? 'smooth' : 'auto' })
+  if (jump && moving()) replay(row, 'flash')
 }
 
-/** Puts the details right under the selected row, or hides them; then redraws the lanes. */
+/** Set while the details open under a new row, so their first content grows from zero. */
+let detailsOpening = false
+
+/** Puts the details right under the selected row, or folds them away; then redraws the lanes. */
 function placeDetails(): void {
   const row = selected ? rowOf(selected) : null
   if (selected && !row) selected = null // gone after a refresh (rebased, branch deleted)
   if (row) {
+    if (detailsEl.hidden || detailsEl.previousElementSibling !== row) {
+      // Collapsed until its first content arrives, then it grows to fit (morphDetails).
+      detailsOpening = true
+      for (const running of detailsEl.getAnimations()) running.cancel()
+      detailsEl.replaceChildren()
+      detailsEl.style.height = '0px'
+    }
     detailsEl.style.marginLeft = `${graphWidth}px`
     row.after(detailsEl)
     detailsEl.hidden = false
+  } else if (!detailsEl.hidden && detailsEl.isConnected && moving()) {
+    const closing = tweenHeight(detailsEl, detailsEl.offsetHeight, 0, true, 160)
+    if (closing) closing.onfinish = () => hideDetails()
+    else hideDetails()
+    return
   } else {
-    detailsEl.hidden = true
-    detailsEl.replaceChildren()
+    hideDetails()
+    return
   }
   drawGraph()
+}
+
+function hideDetails(): void {
+  for (const running of detailsEl.getAnimations()) running.cancel()
+  detailsOpening = false
+  detailsEl.style.height = ''
+  detailsEl.hidden = true
+  detailsEl.replaceChildren()
+  drawGraph()
+}
+
+/** Renders new details content and animates the height from what was shown to what is. */
+function morphDetails(render: () => void): void {
+  const from = detailsOpening ? 0 : detailsEl.offsetHeight
+  detailsOpening = false
+  detailsEl.style.height = ''
+  render()
+  tweenHeight(detailsEl, from, detailsEl.offsetHeight)
 }
 
 // ---- Commit details ------------------------------------------------------------------------
@@ -372,9 +473,13 @@ async function loadDetails(hash: string | null): Promise<void> {
     renderDetails(cached)
     return
   }
-  renderDetailsMessage('pending', 'Loading…')
+  // Most answers come back within a few frames: only say "Loading…" when one does not.
+  const slow = setTimeout(() => {
+    if (mine === detailsSeq) renderDetailsMessage('pending', 'Loading…')
+  }, 150)
   try {
     const result: DetailsLoad = await orca.plugin.request('commit.details', { path: repo.path, hash })
+    clearTimeout(slow)
     if (mine !== detailsSeq) return
     if (!result.ok) {
       renderDetailsMessage('error', result.message)
@@ -383,6 +488,7 @@ async function loadDetails(hash: string | null): Promise<void> {
     detailsCache.set(hash, result.details)
     renderDetails(result.details)
   } catch (error) {
+    clearTimeout(slow)
     if (mine !== detailsSeq) return
     const e = error as { code?: string; message?: string }
     renderDetailsMessage('error', `${e.code ?? 'error'}: ${e.message ?? String(error)}`)
@@ -405,7 +511,7 @@ function closeButton(): HTMLElement {
 }
 
 function renderDetailsMessage(tone: 'pending' | 'error', text: string): void {
-  detailsEl.replaceChildren(closeButton(), el('p', tone, text))
+  morphDetails(() => detailsEl.replaceChildren(closeButton(), el('p', tone, text)))
 }
 
 /** Two columns when there is room (commit info | changed files), stacked in the sidebar. */
@@ -427,7 +533,7 @@ function renderDetails(d: CommitDetails): void {
 
   const grid = el('div', 'details-grid')
   grid.append(info, renderFiles(d))
-  detailsEl.replaceChildren(closeButton(), grid)
+  morphDetails(() => detailsEl.replaceChildren(closeButton(), grid))
 }
 
 function person(name: string, email: string): Node[] {
@@ -441,7 +547,7 @@ function parentLink(hash: string): HTMLElement {
   const link = el('button', 'parent mono', hash)
   link.type = 'button'
   link.title = commits.some((c) => c.hash === hash) ? 'Show this commit' : 'Not loaded yet: scroll down to load it'
-  link.addEventListener('click', () => reveal(hash))
+  link.addEventListener('click', () => reveal(hash, true))
   return link
 }
 
@@ -503,12 +609,23 @@ function renderFolderContents(folder: Folder): HTMLElement {
     const toggle = el('button', 'tree-row folder')
     toggle.type = 'button'
     toggle.setAttribute('aria-expanded', 'true')
-    toggle.append(treeIcon('folder'), el('span', 'name', label))
+    toggle.append(chevron(), treeIcon('folder'), el('span', 'name', label))
     const contents = renderFolderContents(shown)
     toggle.addEventListener('click', () => {
       const open = toggle.getAttribute('aria-expanded') !== 'true'
       toggle.setAttribute('aria-expanded', String(open))
-      contents.hidden = !open
+      if (open) {
+        contents.hidden = false
+        tweenHeight(contents, 0, contents.offsetHeight, false, 160)
+      } else {
+        const folding = tweenHeight(contents, contents.offsetHeight, 0, true, 140)
+        const done = () => {
+          for (const running of contents.getAnimations()) running.cancel()
+          contents.hidden = toggle.getAttribute('aria-expanded') !== 'true'
+        }
+        if (folding) folding.onfinish = done
+        else done()
+      }
     })
     item.append(toggle, contents)
     list.append(item)
@@ -532,6 +649,12 @@ function renderFile(file: FileChange): HTMLElement {
     item.append(el('span', 'stat', 'binary'))
   }
   return item
+}
+
+function chevron(): SVGSVGElement {
+  const node = svg('svg', { viewBox: '0 0 16 16', class: 'chevron', 'aria-hidden': 'true' })
+  node.append(svg('path', { d: 'M6 4l4 4-4 4' }))
+  return node
 }
 
 function treeIcon(kind: 'folder' | 'file'): SVGSVGElement {
@@ -576,6 +699,12 @@ rowsEl.addEventListener('click', (event) => {
   // Clicking the open commit again folds its details.
   if (row?.dataset.hash) select(row.dataset.hash === selected ? null : row.dataset.hash)
 })
+
+rowsEl.addEventListener('mouseover', (event) => {
+  const row = (event.target as Element).closest<HTMLElement>('.row')
+  setHotRow(row ? commits.findIndex((c) => c.hash === row.dataset.hash) : -1)
+})
+rowsEl.addEventListener('mouseleave', () => setHotRow(-1))
 
 listEl.addEventListener('keydown', (event) => {
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return

@@ -52,6 +52,7 @@ Two processes talk through a typed request/post contract (`src/protocol.ts`, whi
 **Layout** (`src/layout.ts`, pure, shared by panel and tests): one pass over topo-ordered commits, keeping `lanes[]` (the hash each lane is heading to).
 - A commit takes the first lane expecting it, or a free lane. Other lanes expecting it converge and are freed.
 - The first parent always continues the commit's lane and colour. Other parents reuse a lane already heading there, or open one.
+- A merge's edge to a non-first parent more than `LONG_EDGE` (50) rows away is cut into two one-row stubs with arrowheads (`cut: 'out' | 'in'`) that hold no lane in between. Otherwise a run of merges pulling in far commits (e.g. `develop` → `uat` many times) grows a staircase of lanes thousands of rows tall. First-parent edges are never cut.
 - Edges whose parent isn't loaded end at `toRow = rows`. `edgePath` turns an edge into SVG: bend into the lane, run straight, bend into the parent. With a `bend` limit each bend stays one row tall, so lanes run straight through an expanded row.
 
 ## Gotchas

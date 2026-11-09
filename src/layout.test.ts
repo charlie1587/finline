@@ -67,3 +67,41 @@ test('a bend across an expanded row stays one row tall, at the node it leaves or
   // Without a bend limit the old shape comes back: the curve spans the whole gap.
   assert.equal(edgePath(arriving, x, y), 'M 0 0 C 0 12 10 12 10 24 C 10 86 0 86 0 148')
 })
+
+test('a long merge edge is cut into two stubs that hold no lane in between', () => {
+  // m merges far; f fills the rows between on the first-parent line; side is the merged parent.
+  const filler = Array.from({ length: 5 }, (_, i) => c(`f${i}`, i < 4 ? `f${i + 1}` : 'side'))
+  const layout = layoutGraph([c('m', 'f0', 'side'), ...filler, c('side')], 3)
+  const out = layout.edges.find((e) => e.cut === 'out')
+  const into = layout.edges.find((e) => e.cut === 'in')
+  assert.deepEqual(out, { fromRow: 0, fromCol: 0, toRow: 1, toCol: 1, lane: 1, color: 1, cut: 'out' })
+  assert.deepEqual(into, { fromRow: 5, fromCol: 1, toRow: 6, toCol: 0, lane: 1, color: 1, cut: 'in' })
+  // Lane 1 is free between the stubs: a tip there would take it.
+  assert.equal(layout.width, 2)
+})
+
+test('long merge edges free their lanes, so a run of them does not grow a staircase', () => {
+  // Ten merges in a row, each pulling in a commit on another line far below.
+  const merges = Array.from({ length: 10 }, (_, i) => c(`m${i}`, i < 9 ? `m${i + 1}` : 'base', `d${i}`))
+  const filler = Array.from({ length: 60 }, (_, i) => c(`x${i}`, i < 59 ? `x${i + 1}` : 'base'))
+  const side = Array.from({ length: 10 }, (_, i) => c(`d${i}`, i < 9 ? `d${i + 1}` : 'base'))
+  const commits = [...merges, ...filler, ...side, c('base')]
+  assert.equal(layoutGraph(commits, Infinity).width, 12)
+  assert.equal(layoutGraph(commits).width, 4)
+})
+
+test('a merge parent past the loaded page is cut only once the gap is already long', () => {
+  assert.equal(layoutGraph([c('m', 'a', 'far'), c('a')], 3).edges.some((e) => e.cut), false)
+  const filler = Array.from({ length: 4 }, (_, i) => c(`a${i}`, `a${i + 1}`))
+  const layout = layoutGraph([c('m', 'a0', 'far'), ...filler], 3)
+  assert.deepEqual(layout.edges.filter((e) => e.cut).map((e) => e.cut), ['out'])
+})
+
+test('stubs draw one row with an arrowhead at the open end', () => {
+  const x = (col: number) => col * 10
+  const y = (row: number) => row * 20
+  const out = { fromRow: 0, fromCol: 0, toRow: 1, toCol: 1, lane: 1, color: 0, cut: 'out' as const }
+  assert.equal(edgePath(out, x, y, 20), 'M 0 0 C 0 5 10 5 10 10 L 10 16 M 7 13 L 10 16 L 13 13')
+  const into = { fromRow: 4, fromCol: 1, toRow: 5, toCol: 0, lane: 1, color: 0, cut: 'in' as const }
+  assert.equal(edgePath(into, x, y, 20), 'M 7 87 L 10 84 L 13 87 M 10 84 L 10 90 C 10 95 0 95 0 100')
+})

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { getRepoHost, registerRepoHost } from './git.ts'
+import { getRepoHost, isSafeSshHost, registerRepoHost, shQuote, sshArgs } from './git.ts'
 import {
   mapEnvironmentsToSshHosts,
   parseSshTargets,
@@ -98,4 +98,30 @@ test('selectRemoteWorkspace disambiguates with preferredPath or active worktree'
   if (active.ok) {
     assert.equal(active.path, '/home/work/repos/repo-a')
   }
+})
+
+test('shQuote leaves plain words alone and single-quotes everything else', () => {
+  assert.equal(shQuote('rev-parse'), 'rev-parse')
+  assert.equal(shQuote('/home/work/repo'), '/home/work/repo')
+  assert.equal(shQuote('core.quotepath=off'), 'core.quotepath=off')
+  assert.equal(shQuote('two words'), `'two words'`)
+  assert.equal(shQuote('x; touch ~/pwned'), `'x; touch ~/pwned'`)
+  assert.equal(shQuote('$(id)'), `'$(id)'`)
+  assert.equal(shQuote(`it's`), `'it'\\''s'`)
+  assert.equal(shQuote(''), `''`)
+})
+
+test('sshArgs quotes the remote command and ends options before the host', () => {
+  const args = sshArgs('linux-dev', ['git', '-C', '/srv/my repo', 'tag', '-a', 'v1', '-m', 'msg $(id); touch ~/pwned'])
+  assert.deepEqual(args.slice(0, 5), ['-T', '-o', 'BatchMode=yes', '--', 'linux-dev'])
+  assert.equal(args.length, 6)
+  assert.equal(args[5], `git -C '/srv/my repo' tag -a v1 -m 'msg $(id); touch ~/pwned'`)
+})
+
+test('sshArgs refuses hosts ssh would read as options or that hold spaces', () => {
+  assert.throws(() => sshArgs('-oProxyCommand=touch x', ['git']))
+  assert.throws(() => sshArgs('my host', ['git']))
+  assert.throws(() => sshArgs('', ['git']))
+  assert.equal(isSafeSshHost('user@linux-dev.example.com'), true)
+  assert.equal(isSafeSshHost('[::1]'), true)
 })

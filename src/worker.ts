@@ -19,7 +19,7 @@ import {
   remoteNames,
   runGit
 } from './git'
-import { getSshTargetMap, resolveRemoteWorkspace } from './remote'
+import { getSshTargetMap, resolveRemoteWorkspace, selectRemoteWorkspace } from './remote'
 import type { ActionResult, Candidate, DetailsLoad, GraphLoad, StatusLoad } from './types'
 
 const DEFAULT_LIMIT = 200
@@ -104,11 +104,24 @@ async function resolveRepo(orca: OrcaWorkerApi, preferredPath?: string): Promise
   const remoteMatches = matches.filter((w) => !isLocal(w.hostId))
   if (remoteMatches.length > 0) {
     const targetMap = await getSshTargetMap()
-    const target = remoteMatches[0]
-    const sshHost = targetMap.get(target.hostId!) || target.hostId!
-    registerRepoHost(target.path, sshHost)
-    workspaceIdByPath.set(target.path, target.id)
-    return { ok: true, path: target.path, resolvedBy: `remote (${sshHost})`, workspaceId: target.id }
+    // Only hosts we can map to an SSH alias: a raw hostId may not be one, and git would run elsewhere.
+    const resolvable = remoteMatches.flatMap((w) => {
+      const sshHost = w.hostId ? targetMap.get(w.hostId) : undefined
+      return sshHost ? [{ path: w.path, sshHost, workspaceId: w.id, branch: w.branch ?? undefined, name: basename(w.path) }] : []
+    })
+    if (resolvable.length === 0) {
+      return {
+        ok: false,
+        reason: 'not-found',
+        message: `"${context.displayName}" is on a remote host whose SSH alias Finline can't find.`
+      }
+    }
+    // Same picker and pinning as local repos when several remote workspaces match.
+    const picked = selectRemoteWorkspace(resolvable, context, preferredPath)
+    if (!picked.ok) return picked
+    registerRepoHost(picked.path, picked.sshHost)
+    if (picked.workspaceId) workspaceIdByPath.set(picked.path, picked.workspaceId)
+    return { ok: true, path: picked.path, resolvedBy: picked.resolvedBy, workspaceId: picked.workspaceId }
   }
 
   // Fallback: If workspace.list is empty or only local, resolve via remote environment discovery
@@ -149,7 +162,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   const served = new Set<string>()
 
   async function watchRepo(path: string): Promise<boolean> {
-    if (watchedPath === path) return true
+    // A failed local watch leaves watcher null, so the next load retries it.
+    if (watchedPath === path && (watcher || pollInterval)) return true
     watcher?.close()
     watcher = null
     if (pollInterval) {

@@ -21,13 +21,36 @@ export function getRepoHost(path: string): string | null {
   return repoHosts.get(path.replace(/\\/g, '/').toLowerCase()) ?? null
 }
 
+/** Quotes one word for a POSIX shell: the remote sshd hands ssh's command line to the login shell. */
+export function shQuote(arg: string): string {
+  return /^[\w.\/@:+=,-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`
+}
+
+/** An ssh destination: no leading `-` (ssh would read it as an option), no spaces or control characters. */
+export function isSafeSshHost(host: string): boolean {
+  return /^[\w.@:\[\]%-]+$/.test(host) && !host.startsWith('-')
+}
+
+/**
+ * Arguments for `ssh` that run one command on `host`. ssh joins everything after the host with
+ * spaces and the remote shell re-parses it, so each word is quoted here; the `--` keeps the host
+ * from ever being read as an option.
+ */
+export function sshArgs(host: string, command: readonly string[]): string[] {
+  if (!isSafeSshHost(host)) throw new Error(`Refusing to connect to SSH host "${host}".`)
+  return ['-T', '-o', 'BatchMode=yes', '--', host, command.map(shQuote).join(' ')]
+}
+
+// Same as the local runGit env: no prompts, no editors, on the remote too.
+const REMOTE_ACTION_ENV = ['env', 'GIT_TERMINAL_PROMPT=0', 'GIT_EDITOR=true', 'GIT_SEQUENCE_EDITOR=true', 'GIT_MERGE_AUTOEDIT=no']
+
 export function git(cwd: string, args: string[], signal?: AbortSignal): Promise<string> {
   const sshHost = getRepoHost(cwd)
   if (sshHost) {
     return new Promise((resolve, reject) => {
       execFile(
         'ssh',
-        ['-T', '-o', 'BatchMode=yes', sshHost, 'git', '-C', cwd, '-c', 'core.quotepath=off', '-c', 'color.ui=false', ...args],
+        sshArgs(sshHost, ['git', '-C', cwd, '-c', 'core.quotepath=off', '-c', 'color.ui=false', ...args]),
         { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true, signal },
         (error, stdout, stderr) => {
           if (error) reject(new Error((stderr || error.message).trim()))
@@ -67,20 +90,19 @@ export function runGit(
 ): Promise<RunResult> {
   const sshHost = getRepoHost(cwd)
   if (sshHost) {
+    let command: string[]
+    try {
+      command = sshArgs(sshHost, [
+        ...REMOTE_ACTION_ENV,
+        'git', '-C', cwd, '-c', 'core.quotepath=off', '-c', 'color.ui=false', ...args
+      ])
+    } catch (error) {
+      return Promise.resolve({ code: 1, stdout: '', stderr: (error as Error).message, timedOut: false })
+    }
     return new Promise((resolve) => {
       const child = execFile(
         'ssh',
-        [
-          '-T',
-          '-o', 'BatchMode=yes',
-          sshHost,
-          'git',
-          '-C', cwd,
-          '-c', 'core.quotepath=off',
-          '-c', 'color.ui=false',
-          '-c', 'core.editor=true',
-          ...args
-        ],
+        command,
         { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, windowsHide: true, timeout: opts.timeoutMs, signal: opts.signal },
         (error, stdout, stderr) => {
           const failure = error as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null
@@ -175,14 +197,15 @@ async function operationInProgress(cwd: string, gitDir: string): Promise<Operati
   if (sshHost) {
     try {
       const out = await new Promise<string>((resolve, reject) => {
+        // Fixed script, the git dir passed as $1 so it is never parsed as shell code.
+        const script =
+          'if test -d "$1/rebase-merge" || test -d "$1/rebase-apply"; then echo rebase; ' +
+          'elif test -f "$1/MERGE_HEAD"; then echo merge; ' +
+          'elif test -f "$1/CHERRY_PICK_HEAD"; then echo cherry-pick; ' +
+          'elif test -f "$1/REVERT_HEAD"; then echo revert; else echo none; fi'
         execFile(
           'ssh',
-          [
-            '-T',
-            '-o', 'BatchMode=yes',
-            sshHost,
-            `test -d "${gitDir}/rebase-merge" && echo rebase || (test -d "${gitDir}/rebase-apply" && echo rebase || (test -f "${gitDir}/MERGE_HEAD" && echo merge || (test -f "${gitDir}/CHERRY_PICK_HEAD" && echo cherry-pick || (test -f "${gitDir}/REVERT_HEAD" && echo revert || echo none))))`
-          ],
+          sshArgs(sshHost, ['sh', '-c', script, 'finline', gitDir]),
           { encoding: 'utf8', timeout: 5000 },
           (error, stdout) => {
             if (error) reject(error)
